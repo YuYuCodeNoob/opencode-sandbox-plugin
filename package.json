@@ -1,5 +1,5 @@
 {
-  "name": "opencode-sandbox-plugin",
+  "name": "@yuxuanyu/opencode_sandbox_plugin",
   "version": "0.1.0",
   "description": "Sandbox bash tool commands via Anthropic sandbox-runtime with transparent abstraction",
   "type": "module",
