@@ -25,11 +25,21 @@ Add the package to the `plugin` array in `opencode.json`:
 
 ```jsonc
 {
-  "plugin": ["opencode-sandbox-plugin"]
+  "plugin": ["@yuxuanyu/opencode_sandbox_plugin"]
 }
 ```
 
-Local dev: put this repo in the plugin search path instead.
+Local publish (no registry needed): `npm pack`, then install the tarball into
+opencode's plugin cache so the name resolves:
+
+```bash
+npm pack
+mkdir -p ~/.cache/opencode/packages/@yuxuanyu/opencode_sandbox_plugin@latest
+cd ~/.cache/opencode/packages/@yuxuanyu/opencode_sandbox_plugin@latest
+npm install /path/to/yuxuanyu-opencode_sandbox_plugin-0.1.0.tgz
+```
+
+(`Npm.add` reuses `node_modules/<name>` when present, so no registry is needed.)
 
 ## Configuration
 
