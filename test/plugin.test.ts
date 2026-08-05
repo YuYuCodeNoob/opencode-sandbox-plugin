@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { createSandboxPlugin } from "../src/plugin"
+import { createSandboxPlugin, createV2Client } from "../src/plugin"
 import { encodeTuiCommand, type SandboxTuiCommand } from "../src/tui-protocol"
 import { readRuntime, type SandboxRuntime } from "../src/runtime-store"
 import type { SandboxManagerLike } from "../src/types"
@@ -67,6 +67,37 @@ async function waitForState(runtimeFile: string, state: string, timeout = 3000):
   }
   return r
 }
+
+describe("createV2Client in-process fetch extraction", () => {
+  it("reuses the in-process fetch from input.client (compiled-build transport)", async () => {
+    // 编译版 opencode：Server.url undefined → serverUrl 回退死端口；input.client
+    // 由 opencode 注入进程内 fetch（Server.Default().app.fetch）。v2 client 必须
+    // 复用该 fetch，否则 part.update 会挂死在 localhost:4096。
+    const reached: string[] = []
+    const inProcessFetch = async (req: Request): Promise<Response> => {
+      reached.push(`${req.method} ${new URL(req.url).pathname}`)
+      if (new URL(req.url).pathname.startsWith("/session/")) {
+        return new Response(
+          JSON.stringify([{ info: { id: "m1" }, parts: [{ id: "p1", type: "tool", callID: "c1", state: { input: { command: "wrapped" } } }] }]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      return new Response("not found", { status: 404 })
+    }
+    const fakeV1Client = { _client: { getConfig: () => ({ fetch: inProcessFetch }) } }
+    const client = createV2Client({ client: fakeV1Client, directory: "/work", serverUrl: new URL("http://localhost:4096") } as any)
+
+    const res = await (client as any).session.messages({ sessionID: "s1" })
+    expect(Array.isArray(res.data)).toBe(true)
+    expect(res.data[0].info.id).toBe("m1")
+    expect(reached).toContain("GET /session/s1/message") // 走进程内 fetch，而非网络
+  })
+
+  it("falls back to HTTP when input.client exposes no fetch (source build / mocks)", () => {
+    const client = createV2Client({ client: {}, directory: "/work", serverUrl: new URL("http://localhost:4096") } as any)
+    expect(client).toBeDefined()
+  })
+})
 
 describe("server plugin tui.command.execute channel", () => {
   it("sandbox.get writes the shared runtime file", async () => {

@@ -39,11 +39,37 @@ export function createV2Client(input: PluginInput): V2ClientLike {
     ? { Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}` }
     : undefined
   debugLog("createV2Client:baseUrl", baseUrl)
+
+  // 编译版 opencode（TUI + server 同进程）里 `Server.url` 为 undefined，
+  // serverUrl 回退到 localhost:4096（死端口，HTTP 调用会挂起）。opencode 给
+  // `input.client`（v1 SDK）注入了**进程内 fetch**（`Server.Default().app.fetch`，
+  // 直达本进程 HTTP handler），但 v1 SDK 缺 part 端点。把该 fetch 借给 v2 client，
+  // part.update / session.message 就能在进程内直达 server。
+  const inProcessFetch = extractInProcessFetch(input.client)
+  debugLog("createV2Client:fetch", inProcessFetch ? "in-process" : "http")
   return createOpencodeClient({
     baseUrl,
     directory: input.directory,
+    // `Server.Default().app.fetch` 签名是 `(req: Request) => Promise<Response>`，
+    // 比全局 fetch 窄；SDK 运行时只调用 `fetch(request)`，类型上做一次收窄转换。
+    ...(inProcessFetch ? { fetch: inProcessFetch as unknown as typeof fetch } : {}),
     ...(headers ? { headers } : {}),
   }) as unknown as V2ClientLike
+}
+
+/**
+ * 从 legacy `input.client`（v1 SDK，由 opencode 用进程内 fetch 构建）里取出
+ * 底层 `createClient` 的 fetch。v1 SDK 缺 part 端点，v2 client 需要同样的传输。
+ * 取不到时返回 undefined（回退普通 HTTP，测试/mock 场景）。
+ */
+function extractInProcessFetch(client: unknown): ((req: Request) => Promise<Response>) | undefined {
+  try {
+    const raw = (client as { _client?: { getConfig?: () => { fetch?: unknown } } })?._client
+    const fetch = raw?.getConfig?.().fetch
+    return typeof fetch === "function" ? (fetch as (req: Request) => Promise<Response>) : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** Resolve after `ms` or reject with a timeout error, whichever comes first. */
