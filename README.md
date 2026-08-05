@@ -108,6 +108,8 @@ Sandbox policy is read from three layers (highest wins, deep-merged):
     global allowlist (future connections won't prompt).
   - **Deny** — rejects the connection.
   - If no choice is made within 15s the connection is denied (fail-closed).
+  - A short debounce coalesces bursts of asks (e.g. one `curl -L` following
+    redirects to several hosts) into a single dialog showing `(1/N)`.
 - `sandbox_status` (read-only, LLM-visible) — state, policy source, pending
   network grants, recent violations.
 

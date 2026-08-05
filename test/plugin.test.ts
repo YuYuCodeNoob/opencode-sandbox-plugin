@@ -30,7 +30,10 @@ async function make(opts: { globalPath?: string } = {}) {
   const globalPath = opts.globalPath ?? path.join(dir, "g.json")
   const runtimeFile = path.join(path.dirname(globalPath), "runtime.json")
   const client: V2ClientLike = {
-    session: { messages: async () => [] },
+    session: {
+      messages: async () => [],
+      message: async () => ({}),
+    },
     part: { update: async () => ({}) },
     permission: { reply: async () => ({}) },
     tui: {

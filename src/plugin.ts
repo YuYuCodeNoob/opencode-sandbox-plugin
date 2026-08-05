@@ -9,6 +9,7 @@ import { PermissionBridge } from "./permission-bridge"
 import { ViolationReporter } from "./violations"
 import { decodeTuiCommand } from "./tui-protocol"
 import { runtimePathFor, writeRuntime } from "./runtime-store"
+import { debugLog } from "./debug"
 import type { SandboxManagerLike, SandboxStatus } from "./types"
 
 export interface SandboxPluginOptions {
@@ -37,6 +38,7 @@ export function createV2Client(input: PluginInput): V2ClientLike {
   const headers = password
     ? { Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}` }
     : undefined
+  debugLog("createV2Client:baseUrl", baseUrl)
   return createOpencodeClient({
     baseUrl,
     directory: input.directory,
@@ -168,7 +170,13 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
       if (tool !== "bash") return
       const original = transparency.peekOriginal(callID)
       if (original !== undefined) output.title = original
-      await withTimeout(transparency.repair(client, sessionID, callID), 3000).catch(() => {})
+      // 修复 part 的 state.input.command（透明抽象）。不阻塞 bash：HTTP 的
+      // 定位+回写比 tool-result → completeToolCall 慢，稍作延迟让后者先把
+      // part 置为 completed，修复再读已完成 part 并原样保留其 status。
+      const messageID = transparency.peekMessageID(callID)
+      setTimeout(() => {
+        void withTimeout(transparency.repair(client, sessionID, callID, messageID), 5000).catch(() => {})
+      }, 250)
       controller.afterSpawn(callID)
     },
 
@@ -209,8 +217,11 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
       // 2) D7: auto-approve OpenCode's own bash permission for wrapped commands.
       if (ev.type !== "permission.asked") return
       if (!controller.isActive()) return
-      const callID = ev.properties?.tool?.callID
-      if (typeof callID === "string" && transparency.hasWrapped(callID)) {
+      const toolInfo = ev.properties?.tool
+      const callID = typeof toolInfo?.callID === "string" ? toolInfo.callID : undefined
+      if (callID && transparency.hasWrapped(callID)) {
+        // 记录所在 messageID（tool.execute.after 用它做定向 part 定位，避免全量扫描）
+        if (typeof toolInfo?.messageID === "string") transparency.registerMessageID(callID, toolInfo.messageID)
         // v1 reply endpoint (/permission/{requestID}/reply) resolves the in-process
         // request the bash tool created via ctx.ask.
         await withTimeout(

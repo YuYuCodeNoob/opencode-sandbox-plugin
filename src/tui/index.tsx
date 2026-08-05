@@ -59,6 +59,8 @@ function readState(): SandboxRuntime | null {
   return null
 }
 
+const ASK_DEBOUNCE_MS = 700
+
 function SandboxWidget(props: { api: TuiPluginApi; theme: TuiThemeCurrent }): JSX.Element {
   const { api } = props
 
@@ -72,8 +74,51 @@ function SandboxWidget(props: { api: TuiPluginApi; theme: TuiThemeCurrent }): JS
   onMount(() => {
     send({ v: 1, cmd: "sandbox.get" })
     let lastKey = ""
-    let shownId: string | undefined
+    let shownId: string | undefined // 当前已在弹窗中展示的 ask id（同一 id 绝不重弹）
+    let pendingShowId: string | undefined // 正在防抖等待展示的 ask id
+    let pendingTimer: ReturnType<typeof setTimeout> | undefined
     let ourDialog = false
+
+    const clearPending = (): void => {
+      if (pendingTimer) clearTimeout(pendingTimer)
+      pendingTimer = undefined
+      pendingShowId = undefined
+    }
+
+    // 命令式弹窗展示一个 ask（Allow once / Always allow / Deny）。
+    const showAsk = (ask: { id: string; host: string; port?: number | undefined }, total: number): void => {
+      shownId = ask.id
+      ourDialog = true
+      const label = ask.port !== undefined ? `${ask.host}:${ask.port}` : ask.host
+      api.ui.dialog.replace(
+        () => (
+          <api.ui.DialogSelect
+            title={total > 1 ? `Sandbox 网络授权 (1/${total})` : "Sandbox 网络授权"}
+            placeholder={`↑/↓ 选择，Enter 确认 · ${label}`}
+            options={[
+              { title: "Allow once", value: "once", description: `仅放行当前连接：${label}` },
+              { title: "Always allow", value: "always", description: `写入全局 allowlist：${label}` },
+              { title: "Deny", value: "deny", description: `拒绝：${label}` },
+            ]}
+            onSelect={(opt) => {
+              ourDialog = false
+              api.ui.dialog.clear()
+              if (opt.value === "once") {
+                send({ v: 1, cmd: "sandbox.allow", id: ask.id, host: ask.host, persist: false, scope: "global" })
+              } else if (opt.value === "always") {
+                send({ v: 1, cmd: "sandbox.allow", id: ask.id, host: ask.host, persist: true, scope: "global" })
+              } else {
+                send({ v: 1, cmd: "sandbox.deny", id: ask.id, host: ask.host })
+              }
+            }}
+          />
+        ),
+        () => {
+          ourDialog = false // 用户手动关闭：保持 shownId，不再对同一 ask 重弹
+        },
+      )
+    }
+
     const timer = setInterval(() => {
       const r = readState()
       if (r) {
@@ -90,46 +135,37 @@ function SandboxWidget(props: { api: TuiPluginApi; theme: TuiThemeCurrent }): JS
           lastKey = key
         }
       }
-      const head = r?.asks?.[0]
+      const asks = r?.asks ?? []
+      const head = asks[0]
       const current = head?.id
+
+      // 防抖：新 ask 出现时不立即弹，等一个窗口期收集突发（同一条 curl 的
+      // redirect 链会产生多个 host 的 ask），再一次性弹队列头、显示 (1/N)。
+      // 已展示的 id（shownId）与正在防抖的 id（pendingShowId）都不会重复调度。
       if (current && current !== shownId) {
-        shownId = current
-        ourDialog = true
-        const label = head.port !== undefined ? `${head.host}:${head.port}` : head.host
-        const total = (readState()?.asks ?? []).length
-        api.ui.dialog.replace(
-          () => (
-            <api.ui.DialogSelect
-              title={total > 1 ? `Sandbox 网络授权 (1/${total})` : "Sandbox 网络授权"}
-              placeholder={`↑/↓ 选择，Enter 确认 · ${label}`}
-              options={[
-                { title: "Allow once", value: "once", description: `仅放行当前连接：${label}` },
-                { title: "Always allow", value: "always", description: `写入全局 allowlist：${label}` },
-                { title: "Deny", value: "deny", description: `拒绝：${label}` },
-              ]}
-              onSelect={(opt) => {
-                ourDialog = false
-                api.ui.dialog.clear()
-                if (opt.value === "once") {
-                  send({ v: 1, cmd: "sandbox.allow", id: head.id, host: head.host, persist: false, scope: "global" })
-                } else if (opt.value === "always") {
-                  send({ v: 1, cmd: "sandbox.allow", id: head.id, host: head.host, persist: true, scope: "global" })
-                } else {
-                  send({ v: 1, cmd: "sandbox.deny", id: head.id, host: head.host })
-                }
-              }}
-            />
-          ),
-          () => {
-            ourDialog = false // 用户手动关闭：保持 shownId，不再对同一 ask 重弹
-          },
-        )
-      } else if (!current && ourDialog) {
+        if (current !== pendingShowId) {
+          pendingShowId = current
+          if (pendingTimer) clearTimeout(pendingTimer)
+          pendingTimer = setTimeout(() => {
+            pendingTimer = undefined
+            pendingShowId = undefined
+            const latest = readState()
+            const h = latest?.asks?.[0]
+            if (h && h.id !== shownId) showAsk(h, (latest?.asks ?? []).length)
+          }, ASK_DEBOUNCE_MS)
+        }
+      } else if (!current && pendingTimer) {
+        clearPending()
+      }
+      if (!current && ourDialog) {
         ourDialog = false
         api.ui.dialog.clear()
       }
     }, 400)
-    onCleanup(() => clearInterval(timer))
+    onCleanup(() => {
+      clearInterval(timer)
+      clearPending()
+    })
   })
 
   // 点击入口 → 弹当前状态对话框（dialog 可靠渲染，状态永远准确）。

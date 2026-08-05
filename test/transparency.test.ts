@@ -1,25 +1,27 @@
 import { describe, expect, it } from "bun:test"
 import { TransparencyRepair } from "../src/transparency"
 
-function messagesClient(part: any = {}) {
+function part(callID = "c1", command = "bwrap ... echo hello") {
+  return {
+    id: "p1",
+    type: "tool",
+    callID,
+    tool: "bash",
+    state: { input: { command }, status: "completed" },
+  }
+}
+
+function message(id = "m1", parts: any[] = [part()]) {
+  return { info: { id }, parts }
+}
+
+/** v2 client mock：`session.messages` 返回裸数组（旧测试兼容）。 */
+function messagesClient(parts: any[] = [part()], messageID = "m1") {
   const updated: unknown[] = []
   const client = {
     session: {
-      messages: async () => [
-        {
-          info: { id: "m1" },
-          parts: [
-            {
-              id: "p1",
-              type: "tool",
-              callID: "c1",
-              tool: "bash",
-              state: { input: { command: "bwrap ... echo hello" }, status: "completed" },
-              ...part,
-            },
-          ],
-        },
-      ],
+      messages: async () => [message(messageID, parts)],
+      message: async () => ({}),
     },
     part: {
       update: async (params: any) => {
@@ -29,6 +31,47 @@ function messagesClient(part: any = {}) {
     },
   }
   return { client, updated }
+}
+
+/** v2 client mock：`session.messages` 返回 `{ data, request, response }` 包装（真实 v2 SDK 形状）。 */
+function wrappedClient(parts: any[] = [part()]) {
+  const updated: unknown[] = []
+  const client = {
+    session: {
+      messages: async () => ({ data: [message("m1", parts)], request: {}, response: {} }),
+      message: async () => ({}),
+    },
+    part: {
+      update: async (params: any) => {
+        updated.push(params)
+        return {}
+      },
+    },
+  }
+  return { client, updated }
+}
+
+/** v2 client mock：messageID 命中时 `session.message` 返回 `{ data, ... }` 包装。 */
+function hintedClient(parts: any[] = [part()], hintMessageID = "m2") {
+  const updated: unknown[] = []
+  let messagesCalls = 0
+  const client = {
+    session: {
+      messages: async () => {
+        messagesCalls += 1
+        return { data: [message("m1", parts)], request: {}, response: {} }
+      },
+      message: async ({ messageID }: any) =>
+        messageID === hintMessageID ? { data: message(hintMessageID, parts), request: {}, response: {} } : {},
+    },
+    part: {
+      update: async (params: any) => {
+        updated.push(params)
+        return {}
+      },
+    },
+  }
+  return { client, updated, messagesCalls: () => messagesCalls }
 }
 
 describe("TransparencyRepair", () => {
@@ -60,10 +103,42 @@ describe("TransparencyRepair", () => {
     expect(params.part.state.status).toBe("completed")
   })
 
+  it("unwraps the v2 { data } response shape from session.messages", async () => {
+    const r = new TransparencyRepair()
+    r.register("c1", "echo hello")
+    const { client, updated } = wrappedClient()
+    await r.repair(client as any, "s1", "c1")
+
+    expect(updated).toHaveLength(1)
+    expect((updated[0] as any).part.state.input.command).toBe("echo hello")
+  })
+
+  it("uses the messageID hint to locate the part without scanning the full session", async () => {
+    const r = new TransparencyRepair()
+    r.register("c1", "echo hello")
+    const { client, updated, messagesCalls } = hintedClient([part("c1")], "m2")
+    await r.repair(client as any, "s1", "c1", "m2")
+
+    expect(updated).toHaveLength(1)
+    expect((updated[0] as any).messageID).toBe("m2")
+    expect(messagesCalls()).toBe(0) // 提示路径命中，未走全量扫描
+  })
+
+  it("falls back to the full scan when the messageID hint misses", async () => {
+    const r = new TransparencyRepair()
+    r.register("c1", "echo hello")
+    const { client, updated, messagesCalls } = hintedClient([part("c1")], "m2") // 只有 m2 命中提示路径
+    await r.repair(client as any, "s1", "c1", "wrong-hint")
+
+    expect(updated).toHaveLength(1)
+    expect((updated[0] as any).messageID).toBe("m1") // 回退全量扫描找到
+    expect(messagesCalls()).toBe(1)
+  })
+
   it("does nothing when the part cannot be found", async () => {
     const r = new TransparencyRepair()
     r.register("c1", "echo hello")
-    const { client } = messagesClient({ callID: "other" }) // no matching part
+    const { client } = messagesClient([part("other")]) // no matching part
     await r.repair(client as any, "s1", "c1") // must not throw
     expect(r.takeOriginal("c1")).toBeUndefined() // original consumed
   })
@@ -83,6 +158,7 @@ describe("TransparencyRepair", () => {
         messages: async () => {
           throw new Error("boom")
         },
+        message: async () => ({}),
         part: { update: async () => ({}) },
       },
     }
