@@ -199,9 +199,12 @@ function SandboxWidget(props: { api: TuiPluginApi; theme: TuiThemeCurrent }): JS
 
 const tui: TuiPlugin = async (api: TuiPluginApi) => {
   const slot: TuiSlotPlugin = {
-    order: -1000, // 最左：app_bottom 是底部全宽 bar，低 order 渲染在最前
+    order: -1000,
     slots: {
-      app_bottom(ctx: TuiSlotContext) {
+      sidebar_content(ctx: TuiSlotContext) {
+        return <SandboxWidget api={api} theme={ctx.theme.current} />
+      },
+      home_bottom(ctx: TuiSlotContext) {
         return <SandboxWidget api={api} theme={ctx.theme.current} />
       },
     },
