@@ -93,13 +93,31 @@ function SandboxWidget(props: { api: TuiPluginApi; theme: TuiThemeCurrent }): JS
     })
   }
 
-  // 轮询共享文件：出现待决 ask 就命令式弹窗（slot 静态渲染不影响弹窗）。
+  // 轮询共享文件：出现待决 ask 就命令式弹窗（slot 静态渲染不影响弹窗）；
+  // 检测到开关状态变化就弹本地 toast —— toast 触发一次 TUI 重绘，让 slot 重新
+  // 同步读文件刷新开关标签（静态快照的补偿手段）。
   onMount(() => {
     send({ v: 1, cmd: "sandbox.get" })
+    let lastKey = ""
     let shownId: string | undefined
     let ourDialog = false
     const timer = setInterval(() => {
-      const head = readState()?.asks?.[0]
+      const r = readState()
+      if (r) {
+        const key = `${r.state}:${r.enabled}`
+        if (key !== lastKey) {
+          if (lastKey !== "") {
+            api.ui.toast({
+              title: "Sandbox",
+              message: r.enabled ? `已启用 (${r.source})` : "已关闭",
+              variant: r.state === "error" ? "error" : "info",
+              duration: 1500,
+            })
+          }
+          lastKey = key
+        }
+      }
+      const head = r?.asks?.[0]
       const current = head?.id
       if (current && current !== shownId) {
         shownId = current

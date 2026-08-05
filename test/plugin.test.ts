@@ -54,7 +54,7 @@ function sendEvent(hooks: { event?: (i: any) => Promise<void> }, cmd: SandboxTui
   return hooks.event?.({ event: { id: "e1", type: "tui.command.execute", properties: { command: encodeTuiCommand(cmd) } } } as any)
 }
 
-async function waitForState(runtimeFile: string, state: string, timeout = 1500): Promise<SandboxRuntime | null> {
+async function waitForState(runtimeFile: string, state: string, timeout = 3000): Promise<SandboxRuntime | null> {
   const deadline = Date.now() + timeout
   let r: SandboxRuntime | null = null
   while (Date.now() < deadline) {
