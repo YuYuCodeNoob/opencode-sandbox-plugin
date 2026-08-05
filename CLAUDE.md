@@ -240,14 +240,18 @@ tool.execute.after({callID,...})
 ```
 askCallback({host, port})
   → 按 host 去重（同 host 并发共享一个 pending Promise，生成 ask id）
-  → publish sandbox.ask 事件（tui.command.execute）→ TUI 弹三选
+  → 写入共享 runtime 文件（~/.config/opencode-sandbox/runtime.json 的 asks[]）
   → 挂起该连接（SRT 逐连接阻塞等待回调，已源码验证 filterNetworkRequest）
      ├─ Allow once     → resolve(true)  当前连接放行，不写 allowlist
      ├─ Always allow   → resolve(true) + controller.allowNetwork() → 持久化 + updateConfig 即时生效
      ├─ Deny           → resolve(false) 当前连接拒绝
-     └─ 超时(默认 15s)  → resolve(false) + publish sandbox.ask.resolved
+     └─ 超时(默认 15s)  → resolve(false) + 从 asks[] 移除
 ```
-- 通信通道：`client.tui.publish({type:"tui.command.execute",properties:{command:<json>}})` 经 EventV2/SSE 广播，服务端 `event` hook 与 TUI 插件 `api.event.on` 都能收到；原生 TUI 对未知 command 静默 no-op（已验证）
+- **通信通道（实测修正）**：TUI→server 用 `client.tui.publish({type:"tui.command.execute",properties:{command:<json>}})`（已验证可达）；
+  **server→TUI 不走 SSE 事件** —— 编译版 opencode（1.17.20）中服务端发布的 `tui.command.execute` 因 `event.location.directory` 与 TUI instance 不匹配而到不了 TUI 的 `api.event.on`（已实测），
+  改用**共享 runtime 文件**：服务端每次状态/ask 变化写 `runtime.json`，TUI 插件轮询。
+- **TUI 渲染限制（实测）**：`app_bottom` slot 是**静态快照**，SolidJS 信号/effect 不触发重渲染；
+  开关在每次 TUI 重绘时同步读文件；授权弹窗用 `setInterval` 轮询 + `api.ui.dialog.replace` 命令式弹出（已验证可行）。
 - `strictAllowlist=true` → 不询问直接拒绝
 - 不承诺切断已建立连接（由 SRT 实现决定）
 
@@ -268,15 +272,17 @@ askCallback({host, port})
 
 | 需求 | 实现 |
 |---|---|
-| 未配置访问选择 | PermissionBridge → `sandbox.ask` 事件 → TUI 弹窗（Allow once / Always allow / Deny） |
+| 未配置访问选择 | PermissionBridge → runtime 文件 `asks[]` → TUI 轮询 → `api.ui.dialog.replace` 命令式弹窗（Allow once / Always allow / Deny） |
 | 状态查看 | 只读自定义 tool `sandbox_status`（状态/来源/违规摘要，LLM 可见但无逃逸面） |
-| 开关控制 | TUI 插件 `app_bottom` slot 左下角开关（`🛡 ON/ON*/OFF/OFF*/ERROR`，点击或 `/sandbox-toggle`，设 runtimeOverride） |
-| 状态同步 | 服务端状态变更 → publish `sandbox.state` → TUI 开关刷新 |
-| 通知 | `client.tui.showToast()`：状态变更、文件违规 |
+| 开关控制 | TUI 插件 `app_bottom` slot 左下角开关（`▣ ON/ON*/OFF/OFF*/ERR`，点击或 `/sandbox-toggle`，设 runtimeOverride） |
+| 状态同步 | 服务端写 `runtime.json` → TUI 每次重绘同步读文件刷新开关 |
+| 通知 | `client.tui.showToast()`：状态变更、文件违规（server→TUI 受限时可能不显示，弹窗是主通道） |
 
-**通信通道**（已验证）：`client.tui.publish({ body: { type: "tui.command.execute", properties: { command: <JSON> } } })`
-经 EventV2Bridge → SSE `/event` 广播，服务端插件 `event` hook 与 TUI 插件 `api.event.on("tui.command.execute")` 均能收到。
-协议见 `src/tui-protocol.ts`（`sandbox.get/toggle/allow/deny` ← TUI，`sandbox.state/ask/ask.resolved` → TUI）。
+**通信**：
+- TUI→server：`client.tui.publish({ body: { type: "tui.command.execute", properties: { command: <JSON> } } })`
+  —— `sandbox.get / sandbox.toggle / sandbox.allow / sandbox.deny`，服务端 `event` hook 处理（已验证可达）。
+- server→TUI：共享文件 `~/.config/opencode-sandbox/runtime.json`（`src/runtime-store.ts`），
+  服务端写、TUI 轮询读。协议类型在 `src/tui-protocol.ts` + `src/runtime-store.ts`。
 
 ---
 

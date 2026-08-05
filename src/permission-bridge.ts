@@ -12,6 +12,7 @@
  */
 
 import { encodeTuiCommand, type SandboxTuiCommand } from "./tui-protocol"
+import type { RuntimeAsk } from "./runtime-store"
 import type { AskRequest } from "./types"
 import type { V2ClientLike } from "./transparency"
 
@@ -19,6 +20,7 @@ interface Pending {
   id: string
   host: string
   port: number | undefined
+  expiresAt: number
   resolvers: Array<(allowed: boolean) => void>
   timer: ReturnType<typeof setTimeout>
 }
@@ -33,10 +35,12 @@ export type NetworkDecision = {
 export interface PermissionBridgeOptions {
   timeoutMs?: number
   toast?: boolean
-  /** 把协议命令发给 TUI（经 client.tui.publish）。 */
+  /** 把协议命令发给 TUI（经 client.tui.publish；部分部署下 server→TUI 事件不可达，仅作尽力）。 */
   publish?: (cmd: SandboxTuiCommand) => void
   /** persist=true 时持久化网络策略（controller.allowNetwork）。 */
   onAllowNetwork?: (host: string, scope: "project" | "global") => void | Promise<void>
+  /** 待决 ask 集合变化（新增/解决/超时）时回调，用于刷新共享 runtime 文件。 */
+  onAskChange?: () => void
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000
@@ -58,6 +62,11 @@ export class PermissionBridge {
     return [...this.pending.values()].map((p) => ({ host: p.host, port: p.port }))
   }
 
+  /** Pending asks with ids + expiry (for the shared runtime file the TUI polls). */
+  pendingAsks(): RuntimeAsk[] {
+    return [...this.pending.values()].map((p) => ({ id: p.id, host: p.host, port: p.port, expiresAt: p.expiresAt }))
+  }
+
   /**
    * Called by the controller's askCallback. Returns a promise that stays
    * pending until the TUI resolves it (→ current connection proceeds) or the
@@ -74,20 +83,27 @@ export class PermissionBridge {
       id: crypto.randomUUID(),
       host: req.host,
       port: req.port,
+      expiresAt: Date.now() + timeoutMs,
       resolvers: [],
       timer: setTimeout(() => this.settle(key, false), timeoutMs),
     }
     this.pending.set(key, entry)
+    this.opts.onAskChange?.()
     this.opts.publish?.({ v: 1, cmd: "sandbox.ask", id: entry.id, host: entry.host, port: entry.port, timeoutMs })
     if (this.opts.toast ?? true) {
       const label = req.port !== undefined ? `${req.host}:${req.port}` : req.host
       const seconds = Math.round(timeoutMs / 1000)
-      void this.client.tui.showToast({
-        title: "Sandbox network access",
-        message: `"${label}" is not in the network allowlist. Waiting for your decision in the TUI (${seconds}s).`,
-        variant: "warning",
-        duration: timeoutMs + 5_000,
-      })
+      // Best-effort: the toast is a fallback notification; in deployments where the
+      // server→TUI HTTP path hangs, the timeout keeps it from leaking a request.
+      Promise.race([
+        this.client.tui.showToast({
+          title: "Sandbox network access",
+          message: `"${label}" is not in the network allowlist. Waiting for your decision in the TUI (${seconds}s).`,
+          variant: "warning",
+          duration: timeoutMs + 5_000,
+        }),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]).catch(() => {})
     }
     return new Promise<boolean>((resolve) => entry.resolvers.push(resolve))
   }
@@ -129,6 +145,7 @@ export class PermissionBridge {
     clearTimeout(entry.timer)
     this.pending.delete(key)
     this.opts.publish?.({ v: 1, cmd: "sandbox.ask.resolved", id: entry.id, allowed })
+    this.opts.onAskChange?.()
     for (const resolve of entry.resolvers) resolve(allowed)
   }
 }

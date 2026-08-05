@@ -95,9 +95,11 @@ Sandbox policy is read from three layers (highest wins, deep-merged):
 
 ## Usage
 
-- **Toggle** (bottom-left): click `🛡 ON / OFF`, or type `/sandbox-toggle`.
+- **Toggle** (bottom-left): click `▣ ON / OFF`, or type `/sandbox-toggle`.
   - `ON` / `OFF` — effective state from the config default (`enabledByDefault`).
   - `ON*` / `OFF*` — overridden for this process only; resets on restart.
+  - The label reads the shared runtime file on each TUI repaint, so it may lag
+    a repaint behind a toggle click; `sandbox_status` shows the authoritative state.
 - **Network approval** (TUI dialog when an unlisted host is requested):
   - **Allow once** — lets the current blocked connection through, nothing is persisted.
   - **Always allow** — allows the current connection and writes the host to the
@@ -117,10 +119,17 @@ Sandbox policy is read from three layers (highest wins, deep-merged):
 3. When the sandbox is active, the plugin auto-approves OpenCode's own bash
    permission prompt for wrapped commands (the sandbox policy — not OpenCode's
    bash permission — is the security authority).
-4. SRT's network `askCallback` surfaces as a TUI approval dialog. The server
-   plugin and TUI plugin exchange JSON over the `tui.command.execute` event
-   (`client.tui.publish`) — a channel the LLM cannot reach.
+4. SRT's network `askCallback` writes a pending ask to the shared runtime file
+   (`~/.config/opencode-sandbox/runtime.json`). The TUI plugin polls it and
+   raises a TUI approval dialog; decisions are sent back over
+   `tui.command.execute` (`client.tui.publish`) — a channel the LLM cannot reach.
 5. Violations are read from the SRT violation store and shown as toasts.
+
+The server plugin and TUI plugin exchange state over the shared runtime file
+(server→TUI) and the `tui.command.execute` event (TUI→server). The server also
+publishes the same events best-effort, but in compiled OpenCode builds the SSE
+event direction may not reach the TUI plugin, so the runtime file is the
+authoritative server→TUI channel.
 
 ## Fail-closed
 
@@ -148,6 +157,11 @@ Sandbox policy is read from three layers (highest wins, deep-merged):
   not configurable.
 - Without the TUI plugin installed, network approval falls back to a toast and
   auto-denies after the timeout (the server stays fail-closed).
+- The TUI's `app_bottom` slot renders a static snapshot: the toggle label reads
+  the runtime file on each repaint (it may lag a change by one repaint), and
+  the network dialog is raised by polling rather than push events.
+- Server→TUI communication relies on the shared runtime file, so server and TUI
+  must run on the same machine (the standard local OpenCode deployment).
 
 ## Development
 

@@ -1,14 +1,19 @@
 /**
  * Sandbox TUI 插件 — 左下角开关 + 网络授权弹窗（CLAUDE.md §9 / 控制权迁移）。
  *
- * 在 opencode 的 TUI 进程中加载（`~/.config/opencode/tui.jsonc` 的 plugin 数组）。
- * 与服务端插件通过 `tui.command.execute` 事件双向通信（`client.tui.publish`）：
- *   - 左下角 `app_bottom` slot 渲染沙箱开关（ON / ON星号 / OFF / OFF星号 / ERROR），点击切换；
- *   - 收到 `sandbox.ask` 时弹出三选（Allow once / Always allow / Deny）；
- *   - 决策发回服务端，不经过任何 tool / LLM。
+ * 在 opencode 的 TUI 进程中加载（`~/.config/opencode/tui.json` 的 plugin 数组）。
+ * 通信：
+ *   - TUI → server：`tui.command.execute` 事件（`client.tui.publish`，已验证可达）
+ *     —— sandbox.get / sandbox.toggle / sandbox.allow / sandbox.deny。
+ *   - server → TUI：共享文件 `~/.config/opencode-sandbox/runtime.json`。
  *
- * JSX 转换：tsconfig `jsxImportSource: "@opentui/solid"`（类型）+ build.tui.mjs
- * esbuild-plugin-solid（打包）。
+ * 平台事实（编译版 opencode v1.17.20）：
+ *   - `app_bottom` slot 的渲染是静态快照 —— SolidJS 信号/effect 不会触发重渲染，
+ *     因此开关状态在每次 TUI 重绘时同步读文件。
+ *   - `setInterval` 在插件里能跑、`api.ui.dialog.replace` 命令式弹窗有效 ——
+ *     网络授权弹窗用轮询 + 命令式弹窗实现。
+ *
+ * 控制权在 TUI（人），不暴露给 LLM。
  */
 
 import type { JSX } from "@opentui/solid"
@@ -20,14 +25,42 @@ import type {
   TuiSlotPlugin,
   TuiThemeCurrent,
 } from "@opencode-ai/plugin/tui"
-import { createEffect, createSignal, onCleanup, onMount } from "solid-js"
-import { decodeTuiCommand, encodeTuiCommand, type SandboxTuiCommand } from "../tui-protocol"
+import { createSignal, onCleanup, onMount } from "solid-js"
+import os from "node:os"
+import path from "node:path"
+import { readFileSync } from "node:fs"
+import type { SandboxRuntime } from "../runtime-store"
+import { encodeTuiCommand, type SandboxTuiCommand } from "../tui-protocol"
 
-type StateMsg = Extract<SandboxTuiCommand, { cmd: "sandbox.state" }>
-type AskMsg = Extract<SandboxTuiCommand, { cmd: "sandbox.ask" }>
+function runtimeFile(): string {
+  return path.join(os.homedir(), ".config", "opencode-sandbox", "runtime.json")
+}
+
+/** 同步读共享 runtime 文件（slot 每次重绘调用）。 */
+function readState(): SandboxRuntime | null {
+  try {
+    const raw = readFileSync(runtimeFile(), "utf-8")
+    const parsed = JSON.parse(raw) as Partial<SandboxRuntime>
+    if (parsed && typeof parsed.state === "string") {
+      return {
+        state: parsed.state,
+        enabled: parsed.enabled ?? false,
+        source: parsed.source === "override" ? "override" : "config",
+        override: parsed.override ?? false,
+        activeChildren: parsed.activeChildren ?? 0,
+        pendingRefresh: parsed.pendingRefresh ?? false,
+        lastError: parsed.lastError ?? null,
+        asks: Array.isArray(parsed.asks) ? parsed.asks : [],
+      }
+    }
+  } catch {
+    /* file absent / not yet written */
+  }
+  return null
+}
 
 function toggleLabel(
-  s: StateMsg | null,
+  r: SandboxRuntime | null,
   pal: {
     on: TuiThemeCurrent["success"]
     off: TuiThemeCurrent["textMuted"]
@@ -36,24 +69,23 @@ function toggleLabel(
     text: TuiThemeCurrent["text"]
   },
 ): { label: string; fg: TuiThemeCurrent["success"] } {
-  if (!s) return { label: "🛡 …", fg: pal.text }
-  switch (s.state) {
+  // 不用 <span> 直接放 <box> 里（该环境下不渲染），避免 U+1F6E1 🛡 等缺字形 emoji。
+  if (!r) return { label: "▣ …", fg: pal.text }
+  switch (r.state) {
     case "error":
-      return { label: "🛡 ERROR", fg: pal.err }
+      return { label: "▣ ERR", fg: pal.err }
     case "initializing":
     case "pending-refresh":
-      return { label: "🛡 …", fg: pal.warn }
+      return { label: "▣ …", fg: pal.warn }
     default:
-      if (s.enabled) return { label: s.override ? "🛡 ON*" : "🛡 ON", fg: pal.on }
-      return { label: s.override ? "🛡 OFF*" : "🛡 OFF", fg: pal.off }
+      if (r.enabled) return { label: r.override ? "▣ ON*" : "▣ ON", fg: pal.on }
+      return { label: r.override ? "▣ OFF*" : "▣ OFF", fg: pal.off }
   }
 }
 
 function SandboxWidget(props: { api: TuiPluginApi; theme: TuiThemeCurrent }): JSX.Element {
   const { api } = props
-  const [status, setStatus] = createSignal<StateMsg | null>(null)
-  const [asks, setAsks] = createSignal<AskMsg[]>([])
-  let ourDialogOpen = false
+  const [, setTick] = createSignal(0)
 
   const send = (cmd: SandboxTuiCommand): void => {
     void api.client.tui.publish({
@@ -61,69 +93,57 @@ function SandboxWidget(props: { api: TuiPluginApi; theme: TuiThemeCurrent }): JS
     })
   }
 
-  // 挂载时拉一次当前状态（服务端回 sandbox.state）。
-  onMount(() => send({ v: 1, cmd: "sandbox.get" }))
-
-  const off = api.event.on("tui.command.execute", (evt) => {
-    const msg = decodeTuiCommand(evt.properties.command)
-    if (!msg) return
-    switch (msg.cmd) {
-      case "sandbox.state":
-        setStatus(msg)
-        break
-      case "sandbox.ask":
-        setAsks((prev) => (prev.some((a) => a.id === msg.id) ? prev : [...prev, msg]))
-        break
-      case "sandbox.ask.resolved":
-        setAsks((prev) => prev.filter((a) => a.id !== msg.id))
-        break
-    }
-  })
-  onCleanup(off)
-
-  // 队列头渲染网络授权弹窗；解决后展示下一个或关闭。
-  createEffect(() => {
-    const queue = asks()
-    const head = queue[0]
-    if (!head) {
-      if (ourDialogOpen) {
+  // 轮询共享文件：出现待决 ask 就命令式弹窗（slot 静态渲染不影响弹窗）。
+  onMount(() => {
+    send({ v: 1, cmd: "sandbox.get" })
+    let shownId: string | undefined
+    let ourDialog = false
+    const timer = setInterval(() => {
+      const head = readState()?.asks?.[0]
+      const current = head?.id
+      if (current && current !== shownId) {
+        shownId = current
+        ourDialog = true
+        const label = head.port !== undefined ? `${head.host}:${head.port}` : head.host
+        const total = (readState()?.asks ?? []).length
+        api.ui.dialog.replace(
+          () => (
+            <api.ui.DialogSelect
+              title={total > 1 ? `Sandbox 网络授权 (1/${total})` : "Sandbox 网络授权"}
+              placeholder={`↑/↓ 选择，Enter 确认 · ${label}`}
+              options={[
+                { title: "Allow once", value: "once", description: `仅放行当前连接：${label}` },
+                { title: "Always allow", value: "always", description: `写入全局 allowlist：${label}` },
+                { title: "Deny", value: "deny", description: `拒绝：${label}` },
+              ]}
+              onSelect={(opt) => {
+                ourDialog = false
+                api.ui.dialog.clear()
+                if (opt.value === "once") {
+                  send({ v: 1, cmd: "sandbox.allow", id: head.id, host: head.host, persist: false, scope: "global" })
+                } else if (opt.value === "always") {
+                  send({ v: 1, cmd: "sandbox.allow", id: head.id, host: head.host, persist: true, scope: "global" })
+                } else {
+                  send({ v: 1, cmd: "sandbox.deny", id: head.id, host: head.host })
+                }
+              }}
+            />
+          ),
+          () => {
+            ourDialog = false // 用户手动关闭：保持 shownId，不再对同一 ask 重弹
+          },
+        )
+      } else if (!current && ourDialog) {
+        ourDialog = false
         api.ui.dialog.clear()
-        ourDialogOpen = false
       }
-      return
-    }
-    if (api.ui.dialog.open && !ourDialogOpen) return // 栈上已有其他弹窗，本次等待超时自动拒绝
-    ourDialogOpen = true
-    const label = head.port !== undefined ? `${head.host}:${head.port}` : head.host
-    api.ui.dialog.replace(
-      () => (
-        <api.ui.DialogSelect
-          title={queue.length > 1 ? `Sandbox 网络授权 (1/${queue.length})` : "Sandbox 网络授权"}
-          placeholder={`↑/↓ 选择，Enter 确认 · ${label}`}
-          options={[
-            { title: "Allow once", value: "once", description: `仅放行当前连接：${label}` },
-            { title: "Always allow", value: "always", description: `写入全局 allowlist：${label}` },
-            { title: "Deny", value: "deny", description: `拒绝：${label}` },
-          ]}
-          onSelect={(opt) => {
-            setAsks((prev) => prev.filter((a) => a.id !== head.id))
-            if (opt.value === "once") {
-              send({ v: 1, cmd: "sandbox.allow", id: head.id, host: head.host, persist: false, scope: "global" })
-            } else if (opt.value === "always") {
-              send({ v: 1, cmd: "sandbox.allow", id: head.id, host: head.host, persist: true, scope: "global" })
-            } else {
-              send({ v: 1, cmd: "sandbox.deny", id: head.id, host: head.host })
-            }
-          }}
-        />
-      ),
-      () => {
-        ourDialogOpen = false
-      },
-    )
+    }, 400)
+    onCleanup(() => clearInterval(timer))
   })
 
-  const pal = toggleLabel(status(), {
+  // slot 渲染：每次 TUI 重绘时同步读文件（静态快照，随重绘刷新）。
+  const r = readState()
+  const pal = toggleLabel(r, {
     on: props.theme.success,
     off: props.theme.textMuted,
     warn: props.theme.warning,
@@ -131,8 +151,14 @@ function SandboxWidget(props: { api: TuiPluginApi; theme: TuiThemeCurrent }): JS
     text: props.theme.text,
   })
   return (
-    <box paddingX={1} onMouseUp={() => send({ v: 1, cmd: "sandbox.toggle" })}>
-      <span style={{ fg: pal.fg }}>{pal.label}</span>
+    <box
+      paddingX={1}
+      onMouseUp={() => {
+        send({ v: 1, cmd: "sandbox.toggle" })
+        setTick((n) => n + 1) // 提示后续重绘时刷新
+      }}
+    >
+      <text style={{ fg: pal.fg }}>{pal.label}</text>
     </box>
   )
 }

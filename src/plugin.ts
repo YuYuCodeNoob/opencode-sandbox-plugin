@@ -7,7 +7,8 @@ import { SandboxPolicyStore } from "./policy-store"
 import { TransparencyRepair, type V2ClientLike } from "./transparency"
 import { PermissionBridge } from "./permission-bridge"
 import { ViolationReporter } from "./violations"
-import { decodeTuiCommand, encodeTuiCommand, type SandboxTuiCommand } from "./tui-protocol"
+import { decodeTuiCommand } from "./tui-protocol"
+import { runtimePathFor, writeRuntime } from "./runtime-store"
 import type { SandboxManagerLike, SandboxStatus } from "./types"
 
 export interface SandboxPluginOptions {
@@ -24,6 +25,10 @@ export interface SandboxPluginOptions {
  * create/reply and session part-update APIs the sandbox needs, so we build the
  * v2 client ourselves. Auth mirrors ServerAuth.headers(): Basic auth only when
  * OPENCODE_SERVER_PASSWORD is set.
+ *
+ * NOTE: in compiled opencode deployments `input.serverUrl` may fall back to
+ * `http://localhost:4096` (no real server there) — calls made through this
+ * client are best-effort and wrapped in timeouts by the caller.
  */
 export function createV2Client(input: PluginInput): V2ClientLike {
   const baseUrl = input.serverUrl?.toString() ?? "http://localhost:4096"
@@ -39,6 +44,23 @@ export function createV2Client(input: PluginInput): V2ClientLike {
   }) as unknown as V2ClientLike
 }
 
+/** Resolve after `ms` or reject with a timeout error, whichever comes first. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timeout")), ms)
+    p.then(
+      (v) => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+      (e) => {
+        clearTimeout(timer)
+        reject(e)
+      },
+    )
+  })
+}
+
 /**
  * Wire the sandbox into an OpenCode plugin (CLAUDE.md §6).
  *
@@ -51,6 +73,9 @@ export function createV2Client(input: PluginInput): V2ClientLike {
  *   sends `sandbox.get/toggle/allow/deny` through `client.tui.publish`; the LLM
  *   cannot reach it. Sandbox enable/disable and network decisions are therefore
  *   not exposed as tools (no escape surface).
+ * - Shared runtime file (`~/.config/opencode-sandbox/runtime.json`): the server
+ *   writes state + pending asks; the TUI plugin polls it. This is the server→TUI
+ *   channel (the SSE event direction is unreliable in compiled deployments).
  * - `event` + `permission.asked` + v2 `permission.reply`: D7 permission
  *   takeover. The `permission.ask` hook is declared by the plugin API but never
  *   invoked by current OpenCode; instead we auto-reply "once" to permission
@@ -65,17 +90,23 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
   })
   const adapter = new SandboxRuntimeAdapter(opts.manager, { cwd: input.directory })
   const transparency = new TransparencyRepair()
+  const runtimeFile = runtimePathFor(opts.globalConfigPath)
 
-  /** Broadcast a protocol command to the TUI plugin over the SSE event bus. */
-  const publishTui = (cmd: SandboxTuiCommand): void => {
-    void client.tui.publish({
-      body: { type: "tui.command.execute", properties: { command: encodeTuiCommand(cmd) } },
-    })
-  }
-  const publishState = (s: SandboxStatus): void => {
-    publishTui({
-      v: 1,
-      cmd: "sandbox.state",
+  let controller!: SandboxController
+  let refreshRuntime: () => void = () => {}
+  const bridge = new PermissionBridge(client, {
+    onAllowNetwork: (host, scope) => controller.allowNetwork(host, scope),
+    onAskChange: () => refreshRuntime(),
+  })
+  controller = new SandboxController({
+    adapter,
+    policyStore: store,
+    onAsk: (req) => bridge.handleAsk(req),
+    onStateChange: () => refreshRuntime(),
+  })
+  refreshRuntime = () => {
+    const s: SandboxStatus = controller.status()
+    void writeRuntime(runtimeFile, {
       state: s.state,
       enabled: s.enabled,
       source: s.source,
@@ -83,20 +114,9 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
       activeChildren: s.activeChildren,
       pendingRefresh: s.pendingRefresh,
       lastError: s.lastError,
+      asks: bridge.pendingAsks(),
     })
   }
-
-  let controller!: SandboxController
-  const bridge = new PermissionBridge(client, {
-    publish: publishTui,
-    onAllowNetwork: (host, scope) => controller.allowNetwork(host, scope),
-  })
-  controller = new SandboxController({
-    adapter,
-    policyStore: store,
-    onAsk: (req) => bridge.handleAsk(req),
-    onStateChange: (s) => publishState(s),
-  })
 
   const violationStore = (opts.manager as { getSandboxViolationStore?(): unknown }).getSandboxViolationStore?.()
   const violations = violationStore ? new ViolationReporter(client, violationStore as SandboxViolationStore) : null
@@ -109,6 +129,7 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
     .then((enabled) => {
       if (enabled) return controller.enable().catch(() => {})
     })
+    .finally(() => refreshRuntime()) // 初始状态先写一次，TUI 首次渲染即可读到
 
   return {
     tool: {
@@ -147,7 +168,7 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
       if (tool !== "bash") return
       const original = transparency.peekOriginal(callID)
       if (original !== undefined) output.title = original
-      await transparency.repair(client, sessionID, callID)
+      await withTimeout(transparency.repair(client, sessionID, callID), 3000).catch(() => {})
       controller.afterSpawn(callID)
     },
 
@@ -161,18 +182,18 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
         if (!msg) return
         switch (msg.cmd) {
           case "sandbox.get":
-            publishState(controller.status())
+            refreshRuntime()
             return
           case "sandbox.toggle": {
             // disabled → enable; error → retry enable; active/syncing → disable.
-            const s = controller.status()
             try {
+              const s = controller.status()
               if (s.state === "disabled" || s.state === "error") await controller.enable()
               else await controller.disable()
             } catch {
-              // enable() is fail-closed; onStateChange already pushed the error state.
+              // enable() is fail-closed; onStateChange already refreshed the runtime file.
             }
-            publishState(controller.status())
+            refreshRuntime()
             return
           }
           case "sandbox.allow":
@@ -192,7 +213,10 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
       if (typeof callID === "string" && transparency.hasWrapped(callID)) {
         // v1 reply endpoint (/permission/{requestID}/reply) resolves the in-process
         // request the bash tool created via ctx.ask.
-        await client.permission.reply({ requestID: ev.properties.id, reply: "once" })
+        await withTimeout(
+          client.permission.reply({ requestID: ev.properties.id, reply: "once" }),
+          3000,
+        ).catch(() => {})
       }
     },
 
