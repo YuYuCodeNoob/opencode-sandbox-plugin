@@ -102,6 +102,32 @@ describe("SandboxController", () => {
     expect(mgr.calls).toContain("reset")
   })
 
+  it("status().source reflects config default vs runtime override", async () => {
+    const { controller } = await make()
+    expect(controller.status().source).toBe("config") // no override set
+    await controller.enable() // enable() sets runtimeOverride=true
+    expect(controller.status().source).toBe("override")
+    await controller.disable()
+    expect(controller.status().source).toBe("override") // override=false still an override
+  })
+
+  it("fires onStateChange at terminal transitions", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "sbx-ctl-"))
+    const mgr = manager()
+    const store = new SandboxPolicyStore({ globalPath: path.join(dir, "g.json"), projectPath: path.join(dir, "p.json") })
+    const adapter = new SandboxRuntimeAdapter(mgr, { cwd: "/work" })
+    const states: string[] = []
+    const controller = new SandboxController({
+      adapter,
+      policyStore: store,
+      onStateChange: (s) => states.push(s.state),
+    })
+    await controller.enable()
+    await controller.disable()
+    expect(states).toContain("active")
+    expect(states).toContain("disabled")
+  })
+
   it("allowNetwork updates config live and persists the domain", async () => {
     const { dir, controller, mgr } = await make()
     await controller.enable()

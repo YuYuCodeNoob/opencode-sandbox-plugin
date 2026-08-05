@@ -19,6 +19,8 @@ export interface SandboxPolicy {
 export interface SandboxStatus {
   state: SandboxState
   enabled: boolean
+  /** 有效开关来源：配置默认（enabledByDefault）或本进程 runtime override。 */
+  source: "config" | "override"
   lastError: { code: string; message: string } | null
   effectivePolicyVersion: number
   activeChildren: number

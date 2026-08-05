@@ -32,6 +32,8 @@ export interface V2ClientLike {
   }
   tui: {
     showToast(params: { title: string; message: string; variant: string; duration?: number }): Promise<unknown>
+    /** 向 TUI 广播 `tui.command.execute` 事件（TUI 插件 api.event.on 可收到）。 */
+    publish(params: { body: { type: string; properties: Record<string, unknown> } }): Promise<unknown>
   }
 }
 

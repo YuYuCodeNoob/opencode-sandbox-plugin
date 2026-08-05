@@ -30,6 +30,8 @@ export class SandboxController {
       policyStore: SandboxPolicyStore
       onAsk?: (req: AskRequest) => Promise<boolean>
       onError?: (err: SandboxError) => void
+      /** 状态机抵达稳定终态时回调（enable/disable/refresh/策略变更），用于向 TUI 推送。 */
+      onStateChange?: (status: SandboxStatus) => void
     },
   ) {}
 
@@ -37,11 +39,16 @@ export class SandboxController {
     return {
       state: this.state,
       enabled: this.state !== "disabled",
+      source: this.deps.policyStore.getRuntimeOverride() !== null ? "override" : "config",
       lastError: this.lastError,
       effectivePolicyVersion: this.effectivePolicyVersion,
       activeChildren: this.children.size,
       pendingRefresh: this.pendingRefresh,
     }
+  }
+
+  private emitState(): void {
+    this.deps.onStateChange?.(this.status())
   }
 
   isActive(): boolean {
@@ -79,6 +86,7 @@ export class SandboxController {
         await this.deps.adapter.initialize(config, this.askCallback())
         this.state = "active"
         this.pendingRefresh = false
+        this.emitState()
       } catch (e) {
         const code =
           (e as Error).message === SANDBOX_ERROR_CODES.platformUnsupported
@@ -87,6 +95,7 @@ export class SandboxController {
         this.state = "error"
         this.lastError = { code, message: (e as Error).message }
         this.deps.onError?.(this.lastError)
+        this.emitState()
         throw e
       }
     })
@@ -146,6 +155,7 @@ export class SandboxController {
     if (this.children.size > 0) {
       this.pendingRefresh = true
       this.state = "pending-refresh"
+      this.emitState()
       return
     }
     await this.reinitialize()
@@ -159,9 +169,11 @@ export class SandboxController {
       const config = this.deps.adapter.buildSrtConfig(policy)
       await this.deps.adapter.initialize(config, this.askCallback())
       this.state = "active"
+      this.emitState()
     } catch (e) {
       this.state = "error"
       this.lastError = { code: SANDBOX_ERROR_CODES.initFailed, message: (e as Error).message }
+      this.emitState()
       throw e
     }
   }
@@ -200,6 +212,7 @@ export class SandboxController {
         this.deps.adapter.updateConfig(next)
       })
     }
+    this.emitState()
   }
 
   async disable(): Promise<void> {
@@ -209,6 +222,7 @@ export class SandboxController {
       await this.deps.adapter.reset()
       this.state = "disabled"
       this.pendingRefresh = false
+      this.emitState()
     })
   }
 

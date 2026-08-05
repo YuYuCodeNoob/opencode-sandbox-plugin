@@ -65,6 +65,14 @@ OpenCode server 进程内
     三层配置读取 + deep merge + 持久化
 ```
 
+**TUI 进程内**（同一 npm 包 `./tui` 导出，经 `~/.config/opencode/tui.jsonc` 加载；参考 `opencode-visual-cache`）：
+```
+└─ SandboxWidget
+     ├─ app_bottom slot：左下角开关（ON/ON*/OFF/OFF*/ERROR，点击 / /sandbox-toggle）
+     ├─ 网络授权弹窗（Allow once / Always allow / Deny，api.ui.dialog + DialogSelect）
+     └─ api.event.on("tui.command.execute") ↔ client.tui.publish 与服务端通信
+```
+
 **职责边界**：
 - TUI/agent 只通过自定义 tool + client SDK 与沙箱交互，绝不直接调 `SandboxManager`
 - `SandboxController` 是唯一允许调用 SRT 生命周期 API 的对象
@@ -83,6 +91,7 @@ OpenCode server 进程内
 | D5 | 默认网络策略 | **allow-only + 未批准弹窗**（`strictAllowlist=false`） |
 | D6 | 透明抽象 | 执行用包装命令，DB/展示/LLM 上下文只含原始命令（`TransparencyRepair` 修复 part） |
 | D7 | opencode 权限 | **沙箱开启时接管 bash 权限**：`permission.ask` hook 识别自己的包装命令并自动 allow |
+| D8 | 控制权 | **沙箱控制不暴露给 LLM**（enable/disable/allow/deny 工具全部移除，否则 LLM 可逃逸）。控制走 TUI 插件：左下角开关（`app_bottom` slot）+ 网络授权弹窗，经 `tui.command.execute` 事件（`client.tui.publish`）与服务端双向通信 |
 
 ---
 
@@ -226,19 +235,19 @@ tool.execute.after({callID,...})
 
 ## 7. 网络授权桥（PermissionBridge，实现变体）
 
-**已源码验证：`v2.permission.create` 端点存在但 TUI 只渲染 v1 `permission.asked`（`tui/src/context/sync.tsx:190`），v2-created 请求不会显示弹窗**；v1 权限系统又没有 HTTP create 端点。故改为 **等待式半交互**（用户确认）：
+**已源码验证：`v2.permission.create` 端点存在但 TUI 只渲染 v1 `permission.asked`（`tui/src/context/sync.tsx:190`），v2-created 请求不会显示弹窗**；v1 权限系统又没有 HTTP create 端点。故改为 **TUI 弹窗授权**（D8：控制权在 TUI 人机，不暴露给 LLM）：
 
 ```
 askCallback({host, port})
-  → 按 host 去重（同 host 并发共享一个 pending Promise，只弹一次 toast）
-  → toast：「host 不在白名单，批准请回复 allow <host>，N 秒后自动拒绝」
+  → 按 host 去重（同 host 并发共享一个 pending Promise，生成 ask id）
+  → publish sandbox.ask 事件（tui.command.execute）→ TUI 弹三选
   → 挂起该连接（SRT 逐连接阻塞等待回调，已源码验证 filterNetworkRequest）
-     ├─ sandbox_allow {host} → 返回 true → 当前连接立即放行
-     │     + controller.allowNetwork() → updateConfig() 网络即时生效 + 持久化
-     ├─ sandbox_deny {host}   → 返回 false → 当前连接拒绝
-     └─ 超时(默认 15s)        → 返回 false
+     ├─ Allow once     → resolve(true)  当前连接放行，不写 allowlist
+     ├─ Always allow   → resolve(true) + controller.allowNetwork() → 持久化 + updateConfig 即时生效
+     ├─ Deny           → resolve(false) 当前连接拒绝
+     └─ 超时(默认 15s)  → resolve(false) + publish sandbox.ask.resolved
 ```
-- allow → `SandboxManager.updateConfig()` **同步即时生效**，后续连接走新策略；**当前被阻塞连接**因回调返回 true 而放行
+- 通信通道：`client.tui.publish({type:"tui.command.execute",properties:{command:<json>}})` 经 EventV2/SSE 广播，服务端 `event` hook 与 TUI 插件 `api.event.on` 都能收到；原生 TUI 对未知 command 静默 no-op（已验证）
 - `strictAllowlist=true` → 不询问直接拒绝
 - 不承诺切断已建立连接（由 SRT 实现决定）
 
@@ -259,10 +268,15 @@ askCallback({host, port})
 
 | 需求 | 实现 |
 |---|---|
-| 未配置访问选择 | PermissionBridge → `permission.create` → once/always/reject 弹窗 |
-| 状态查看 | 自定义 tool `sandbox_status`（返回状态/配置/违规摘要） |
-| 开关控制 | 自定义 tools `sandbox_enable` / `sandbox_disable`（设 runtimeOverride） |
-| 通知 | `client.showToast()`：状态变更、文件违规 |
+| 未配置访问选择 | PermissionBridge → `sandbox.ask` 事件 → TUI 弹窗（Allow once / Always allow / Deny） |
+| 状态查看 | 只读自定义 tool `sandbox_status`（状态/来源/违规摘要，LLM 可见但无逃逸面） |
+| 开关控制 | TUI 插件 `app_bottom` slot 左下角开关（`🛡 ON/ON*/OFF/OFF*/ERROR`，点击或 `/sandbox-toggle`，设 runtimeOverride） |
+| 状态同步 | 服务端状态变更 → publish `sandbox.state` → TUI 开关刷新 |
+| 通知 | `client.tui.showToast()`：状态变更、文件违规 |
+
+**通信通道**（已验证）：`client.tui.publish({ body: { type: "tui.command.execute", properties: { command: <JSON> } } })`
+经 EventV2Bridge → SSE `/event` 广播，服务端插件 `event` hook 与 TUI 插件 `api.event.on("tui.command.execute")` 均能收到。
+协议见 `src/tui-protocol.ts`（`sandbox.get/toggle/allow/deny` ← TUI，`sandbox.state/ask/ask.resolved` → TUI）。
 
 ---
 
@@ -316,6 +330,7 @@ disabled ──enable──▶ initializing ──成功──▶ active
 6. **文件违规 + pending-refresh** ✅
 7. **自定义 tools + toast + 配置持久化**（status/enable/disable/allow/deny）✅
 8. **验收矩阵测试**（§12；真实 SRT 集成测试 `RUN_SRT=1` 已验证 bwrap 拦截越权写）✅
+9. **控制权迁移（D8）**：移除 enable/disable/allow/deny 四个 LLM 工具；新增 TUI 插件（`./tui` 导出 + `build.tui.mjs`），左下角开关 + 网络授权弹窗，经 `tui.command.execute` 事件通信（✅ 2026-08-05）
 
 ## 14. 参考资料
 

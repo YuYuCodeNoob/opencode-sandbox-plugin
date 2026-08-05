@@ -7,7 +7,8 @@ import { SandboxPolicyStore } from "./policy-store"
 import { TransparencyRepair, type V2ClientLike } from "./transparency"
 import { PermissionBridge } from "./permission-bridge"
 import { ViolationReporter } from "./violations"
-import type { SandboxManagerLike } from "./types"
+import { decodeTuiCommand, encodeTuiCommand, type SandboxTuiCommand } from "./tui-protocol"
+import type { SandboxManagerLike, SandboxStatus } from "./types"
 
 export interface SandboxPluginOptions {
   manager: SandboxManagerLike
@@ -46,6 +47,10 @@ export function createV2Client(input: PluginInput): V2ClientLike {
  *   → throw (fail-closed).
  * - `tool.execute.after`: restore the original command in the stored part
  *   (transparency) and set the display/LLM title back to the original.
+ * - `event` + `tui.command.execute`: human-only control channel. The TUI plugin
+ *   sends `sandbox.get/toggle/allow/deny` through `client.tui.publish`; the LLM
+ *   cannot reach it. Sandbox enable/disable and network decisions are therefore
+ *   not exposed as tools (no escape surface).
  * - `event` + `permission.asked` + v2 `permission.reply`: D7 permission
  *   takeover. The `permission.ask` hook is declared by the plugin API but never
  *   invoked by current OpenCode; instead we auto-reply "once" to permission
@@ -60,21 +65,57 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
   })
   const adapter = new SandboxRuntimeAdapter(opts.manager, { cwd: input.directory })
   const transparency = new TransparencyRepair()
-  const bridge = new PermissionBridge(client)
-  const controller = new SandboxController({
+
+  /** Broadcast a protocol command to the TUI plugin over the SSE event bus. */
+  const publishTui = (cmd: SandboxTuiCommand): void => {
+    void client.tui.publish({
+      body: { type: "tui.command.execute", properties: { command: encodeTuiCommand(cmd) } },
+    })
+  }
+  const publishState = (s: SandboxStatus): void => {
+    publishTui({
+      v: 1,
+      cmd: "sandbox.state",
+      state: s.state,
+      enabled: s.enabled,
+      source: s.source,
+      override: s.source === "override",
+      activeChildren: s.activeChildren,
+      pendingRefresh: s.pendingRefresh,
+      lastError: s.lastError,
+    })
+  }
+
+  let controller!: SandboxController
+  const bridge = new PermissionBridge(client, {
+    publish: publishTui,
+    onAllowNetwork: (host, scope) => controller.allowNetwork(host, scope),
+  })
+  controller = new SandboxController({
     adapter,
     policyStore: store,
     onAsk: (req) => bridge.handleAsk(req),
+    onStateChange: (s) => publishState(s),
   })
 
   const violationStore = (opts.manager as { getSandboxViolationStore?(): unknown }).getSandboxViolationStore?.()
   const violations = violationStore ? new ViolationReporter(client, violationStore as SandboxViolationStore) : null
   violations?.start()
 
+  // Auto-enable when the effective default is on (runtimeOverride ?? enabledByDefault),
+  // so a config of enabledByDefault: true actually activates the sandbox at startup.
+  void store
+    .effectiveEnabled()
+    .then((enabled) => {
+      if (enabled) return controller.enable().catch(() => {})
+    })
+
   return {
     tool: {
+      // Read-only status. Enable/disable/allow/deny are NOT exposed to the LLM —
+      // those are human-only controls (TUI toggle + TUI network dialog).
       sandbox_status: tool({
-        description: "Show sandbox state, effective policy summary, pending network grants, and recent violations.",
+        description: "Show sandbox state, effective policy source, pending network grants, and recent violations.",
         args: {},
         async execute() {
           const s = controller.status()
@@ -82,7 +123,7 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
           const recent = violations?.recent(10) ?? []
           const lines = [
             `State: ${s.state}`,
-            `Enabled: ${s.enabled}`,
+            `Enabled: ${s.enabled} (source: ${s.source})`,
             s.lastError ? `Last error: ${s.lastError.code} — ${s.lastError.message}` : null,
             `Active children: ${s.activeChildren}`,
             `Pending refresh: ${s.pendingRefresh}`,
@@ -90,59 +131,6 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
             `Recent violations (${recent.length}): ${recent.map((v) => v.line).join(" | ") || "none"}`,
           ]
           return lines.filter((line): line is string => line !== null).join("\n")
-        },
-      }),
-
-      sandbox_enable: tool({
-        description: "Enable the sandbox for this session (fail-closed: bash is blocked until active).",
-        args: {},
-        async execute() {
-          try {
-            await controller.enable()
-            return `Sandbox enabled. State: ${controller.status().state}`
-          } catch (e) {
-            return `Failed to enable sandbox: ${(e as Error).message}`
-          }
-        },
-      }),
-
-      sandbox_disable: tool({
-        description: "Disable the sandbox for this session (bash returns to unsandboxed execution).",
-        args: {},
-        async execute() {
-          await controller.disable()
-          return `Sandbox disabled.`
-        },
-      }),
-
-      sandbox_allow: tool({
-        description:
-          "Allow a network domain in the sandbox. Applies immediately to a pending connection for that host and to all future connections.",
-        args: { host: tool.schema.string(), scope: tool.schema.enum(["project", "global"]).optional() },
-        async execute(args) {
-          const host = args.host
-          const scope = args.scope ?? "global"
-          try {
-            await controller.allowNetwork(host, scope)
-          } catch (e) {
-            return `Failed to update sandbox policy: ${(e as Error).message}`
-          }
-          const resolved = bridge.allow(host)
-          return resolved
-            ? `Allowed ${host} (${scope}). A pending request was approved — the blocked connection may now proceed.`
-            : `Allowed ${host} (${scope}). Policy updated for future connections; no request was pending.`
-        },
-      }),
-
-      sandbox_deny: tool({
-        description: "Deny a network domain in the sandbox (takes precedence over allow).",
-        args: { host: tool.schema.string(), scope: tool.schema.enum(["project", "global"]).optional() },
-        async execute(args) {
-          const host = args.host
-          const scope = args.scope ?? "global"
-          await controller.denyNetwork(host, scope)
-          bridge.deny(host)
-          return `Denied ${host} (${scope}).`
         },
       }),
     },
@@ -164,14 +152,43 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
     },
 
     async event({ event }) {
-      // The plugin API's Event union predates "permission.asked"; treat it dynamically.
-      const ev = event as unknown as {
-        type: string
-        properties: { id: string; tool?: { callID?: string } }
+      const ev = event as unknown as { type: string; properties: Record<string, any> }
+
+      // 1) Human-only TUI control channel (tui.command.execute published by the
+      //    TUI plugin via client.tui.publish). Unknown/foreign commands ignored.
+      if (ev.type === "tui.command.execute") {
+        const msg = decodeTuiCommand(ev.properties?.command)
+        if (!msg) return
+        switch (msg.cmd) {
+          case "sandbox.get":
+            publishState(controller.status())
+            return
+          case "sandbox.toggle": {
+            // disabled → enable; error → retry enable; active/syncing → disable.
+            const s = controller.status()
+            try {
+              if (s.state === "disabled" || s.state === "error") await controller.enable()
+              else await controller.disable()
+            } catch {
+              // enable() is fail-closed; onStateChange already pushed the error state.
+            }
+            publishState(controller.status())
+            return
+          }
+          case "sandbox.allow":
+            bridge.resolve(msg.id, { allow: true, persist: msg.persist, scope: msg.scope })
+            return
+          case "sandbox.deny":
+            bridge.resolve(msg.id, { allow: false })
+            return
+        }
+        return
       }
+
+      // 2) D7: auto-approve OpenCode's own bash permission for wrapped commands.
       if (ev.type !== "permission.asked") return
       if (!controller.isActive()) return
-      const callID = ev.properties.tool?.callID
+      const callID = ev.properties?.tool?.callID
       if (typeof callID === "string" && transparency.hasWrapped(callID)) {
         // v1 reply endpoint (/permission/{requestID}/reply) resolves the in-process
         // request the bash tool created via ctx.ask.

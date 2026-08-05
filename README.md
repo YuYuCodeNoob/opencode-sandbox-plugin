@@ -10,18 +10,28 @@ wrapped command prefix never reaches the DB, the TUI, or the LLM context.
 ## Features
 
 - **Real sandboxing** of `bash` tool commands (each command spawns inside the sandbox).
-- **Network allow-only** with a waiting semi-interactive approval flow.
+- **Network allow-only** with a **human-only TUI approval dialog**
+  (Allow once / Always allow / Deny).
 - **Filesystem policy** (allow/deny read & write) with violation toasts.
+- **TUI bottom-left toggle** (`🛡 ON / ON* / OFF / OFF* / ERROR`) to enable/disable
+  the sandbox for the current process. `*` marks a runtime override.
 - **Transparent abstraction**: the bwrap wrapper is restored to the original
   command in stored parts and display titles.
 - **Fail-closed**: if the sandbox is enabled but cannot initialize, bash is
   blocked rather than silently falling back to unsandboxed execution.
-- **Custom tools**: `sandbox_status`, `sandbox_enable`, `sandbox_disable`,
-  `sandbox_allow`, `sandbox_deny`.
+
+Sandbox **control is not exposed to the LLM** — there are no
+enable/disable/allow tools the model can call (they would let it escape the
+sandbox). Control lives in the TUI: a clickable status toggle and the network
+approval dialog. The only LLM-visible tool is the read-only `sandbox_status`.
 
 ## Install
 
-Add the package to the `plugin` array in `opencode.json`:
+The package ships **two** plugins: a server plugin (sandbox enforcement) and a
+TUI plugin (toggle + approval dialog). Install both:
+
+**1. Server plugin** — add to `opencode.jsonc` (`~/.config/opencode/opencode.jsonc`
+or the project's `opencode.jsonc`):
 
 ```jsonc
 {
@@ -29,14 +39,28 @@ Add the package to the `plugin` array in `opencode.json`:
 }
 ```
 
-Local publish (no registry needed): `npm pack`, then install the tarball into
-opencode's plugin cache so the name resolves:
+**2. TUI plugin** — add to `~/.config/opencode/tui.jsonc`:
+
+```jsonc
+{
+  "plugin": ["@yuxuanyu/opencode_sandbox_plugin"]
+}
+```
+
+Restart OpenCode. The bottom-left corner shows the sandbox toggle; network
+requests to unlisted domains raise a TUI approval dialog.
+
+### Local publish (no registry)
+
+`npm pack`, then install the tarball into opencode's plugin cache so the name
+resolves for both the server and TUI loader:
 
 ```bash
+bun run build:tui   # bundles dist/tui.js for the TUI plugin
 npm pack
 mkdir -p ~/.cache/opencode/packages/@yuxuanyu/opencode_sandbox_plugin@latest
 cd ~/.cache/opencode/packages/@yuxuanyu/opencode_sandbox_plugin@latest
-npm install /path/to/yuxuanyu-opencode_sandbox_plugin-0.1.0.tgz
+npm install /path/to/yuxuanyu-opencode_sandbox_plugin-0.2.0.tgz
 ```
 
 (`Npm.add` reuses `node_modules/<name>` when present, so no registry is needed.)
@@ -49,7 +73,7 @@ Sandbox policy is read from three layers (highest wins, deep-merged):
 |---|---|
 | Project | `<project>/.opencode-sandbox.json` |
 | Global | `~/.config/opencode-sandbox/config.json` |
-| Runtime override | in-memory (per process, via `sandbox_enable`/`sandbox_disable`) |
+| Runtime override | in-memory (per process, via the TUI toggle) |
 
 ```jsonc
 {
@@ -71,18 +95,17 @@ Sandbox policy is read from three layers (highest wins, deep-merged):
 
 ## Usage
 
-- `sandbox_enable` — enable for this session (initializes SRT; fail-closed).
-- `sandbox_disable` — disable; bash returns to unsandboxed execution.
-- `sandbox_allow {host} [{project|global}]` — allow a network domain. If a
-  connection to that host is currently pending, it is approved immediately and
-  the blocked command continues; the policy also updates live for future
-  connections and is persisted.
-- `sandbox_deny {host} [{project|global}]` — deny a domain (takes precedence).
-- `sandbox_status` — state, policy version, active children, pending grants,
-  recent violations.
-
-When an unlisted network host is requested, a toast prompts you to allow it;
-the command's connection is paused for up to 15s (configurable), then denied.
+- **Toggle** (bottom-left): click `🛡 ON / OFF`, or type `/sandbox-toggle`.
+  - `ON` / `OFF` — effective state from the config default (`enabledByDefault`).
+  - `ON*` / `OFF*` — overridden for this process only; resets on restart.
+- **Network approval** (TUI dialog when an unlisted host is requested):
+  - **Allow once** — lets the current blocked connection through, nothing is persisted.
+  - **Always allow** — allows the current connection and writes the host to the
+    global allowlist (future connections won't prompt).
+  - **Deny** — rejects the connection.
+  - If no choice is made within 15s the connection is denied (fail-closed).
+- `sandbox_status` (read-only, LLM-visible) — state, policy source, pending
+  network grants, recent violations.
 
 ## How it works
 
@@ -94,9 +117,9 @@ the command's connection is paused for up to 15s (configurable), then denied.
 3. When the sandbox is active, the plugin auto-approves OpenCode's own bash
    permission prompt for wrapped commands (the sandbox policy — not OpenCode's
    bash permission — is the security authority).
-4. SRT's network `askCallback` surfaces as a toast + pending grant, resolved by
-   `sandbox_allow`/`sandbox_deny` (waiting semi-interactive; approved requests
-   let the current connection proceed).
+4. SRT's network `askCallback` surfaces as a TUI approval dialog. The server
+   plugin and TUI plugin exchange JSON over the `tui.command.execute` event
+   (`client.tui.publish`) — a channel the LLM cannot reach.
 5. Violations are read from the SRT violation store and shown as toasts.
 
 ## Fail-closed
@@ -104,7 +127,7 @@ the command's connection is paused for up to 15s (configurable), then denied.
 - `disabled` → bash runs unsandboxed.
 - `active` → bash runs sandboxed.
 - `initializing` / `error` (including unsupported platform) → bash throws;
-  you must explicitly disable the sandbox to run unsandboxed again.
+  you must explicitly disable the sandbox (TUI toggle) to run unsandboxed again.
 
 ## Requirements
 
@@ -123,6 +146,8 @@ the command's connection is paused for up to 15s (configurable), then denied.
   sandbox restricts, it does not guarantee against every exfiltration path.
 - Unix socket / Apple Events / weaker-isolation options are hardcoded off and
   not configurable.
+- Without the TUI plugin installed, network approval falls back to a toast and
+  auto-denies after the timeout (the server stays fail-closed).
 
 ## Development
 
@@ -131,4 +156,5 @@ bun install
 bun run typecheck   # tsc --noEmit
 bun test            # unit tests (mocked SRT)
 RUN_SRT=1 bun test test/integration.test.ts   # real bwrap sandbox tests
+bun run build:tui   # bundle dist/tui.js (TUI plugin)
 ```

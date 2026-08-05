@@ -1,12 +1,22 @@
 {
   "name": "@yuxuanyu/opencode_sandbox_plugin",
-  "version": "0.1.0",
-  "description": "Sandbox bash tool commands via Anthropic sandbox-runtime with transparent abstraction",
+  "version": "0.2.0",
+  "description": "Sandbox bash tool commands via Anthropic sandbox-runtime with transparent abstraction; human-only TUI controls",
   "type": "module",
   "main": "./src/index.ts",
-  "exports": { ".": "./src/index.ts" },
-  "files": ["src", "README.md"],
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": {
+      "import": "./dist/tui.js",
+      "config": {
+        "enabled": true
+      }
+    }
+  },
+  "files": ["src", "dist", "README.md"],
   "scripts": {
+    "build:tui": "node build.tui.mjs",
+    "prepublishOnly": "node build.tui.mjs",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
@@ -16,8 +26,20 @@
     "@opencode-ai/sdk": "1.17.12",
     "zod": "^3.24.1"
   },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.14.0",
+    "@opencode-ai/sdk": ">=1.14.0",
+    "@opentui/core": ">=0.2.0",
+    "@opentui/solid": ">=0.2.0",
+    "solid-js": ">=1.9.0"
+  },
   "devDependencies": {
+    "@opentui/core": "^0.2.0",
+    "@opentui/solid": "^0.2.0",
     "@types/bun": "latest",
+    "esbuild": "^0.25.0",
+    "esbuild-plugin-solid": "^0.5.0",
+    "solid-js": "^1.9.0",
     "typescript": "^5.6.0"
   }
 }
