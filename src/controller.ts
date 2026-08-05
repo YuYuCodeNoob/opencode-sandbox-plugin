@@ -166,6 +166,42 @@ export class SandboxController {
     }
   }
 
+  /**
+   * Allow a network domain: persist to config, update in-memory desired policy,
+   * and apply live via updateConfig (network changes take effect immediately).
+   */
+  async allowNetwork(host: string, scope: "project" | "global" = "global"): Promise<void> {
+    await this.mutateNetwork("allowedDomains", host, scope)
+  }
+
+  /** Deny a network domain (takes precedence over allow). */
+  async denyNetwork(host: string, scope: "project" | "global" = "global"): Promise<void> {
+    await this.mutateNetwork("deniedDomains", host, scope)
+  }
+
+  private async mutateNetwork(
+    field: "allowedDomains" | "deniedDomains",
+    host: string,
+    scope: "project" | "global",
+  ): Promise<void> {
+    const policy = this.desiredPolicy ?? (await this.deps.policyStore.load())
+    const list = new Set(policy.network[field])
+    list.add(host)
+    const next: SandboxPolicy = {
+      ...policy,
+      network: { ...policy.network, [field]: [...list] },
+    }
+    this.desiredPolicy = next
+    if (field === "allowedDomains") await this.deps.policyStore.addAllowedDomain(host, scope)
+    else await this.deps.policyStore.addDeniedDomain(host, scope)
+    this.effectivePolicyVersion = this.deps.adapter.getEffectivePolicyVersion(next)
+    if (this.state === "active" || this.state === "pending-refresh") {
+      await this.serialized(async () => {
+        this.deps.adapter.updateConfig(next)
+      })
+    }
+  }
+
   async disable(): Promise<void> {
     await this.deps.policyStore.setRuntimeOverride(false)
     await this.serialized(async () => {

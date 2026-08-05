@@ -4,7 +4,8 @@ import { SandboxController } from "./controller"
 import { SandboxRuntimeAdapter } from "./adapter"
 import { SandboxPolicyStore } from "./policy-store"
 import { TransparencyRepair, type V2ClientLike } from "./transparency"
-import type { AskRequest, SandboxManagerLike } from "./types"
+import { PermissionBridge } from "./permission-bridge"
+import type { SandboxManagerLike } from "./types"
 
 export interface SandboxPluginOptions {
   manager: SandboxManagerLike
@@ -12,8 +13,6 @@ export interface SandboxPluginOptions {
   projectConfigPath: string
   /** Injectable v2 client (defaults to one constructed from the plugin input). */
   client?: V2ClientLike
-  /** Network ask handler wired to the controller (set by PermissionBridge, T6). */
-  onAsk?: (req: AskRequest) => Promise<boolean>
 }
 
 /**
@@ -59,10 +58,11 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
   })
   const adapter = new SandboxRuntimeAdapter(opts.manager, { cwd: input.directory })
   const transparency = new TransparencyRepair()
+  const bridge = new PermissionBridge(client)
   const controller = new SandboxController({
     adapter,
     policyStore: store,
-    onAsk: opts.onAsk,
+    onAsk: (req) => bridge.handleAsk(req),
   })
 
   return {
@@ -87,17 +87,15 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
       // The plugin API's Event union predates "permission.asked"; treat it dynamically.
       const ev = event as unknown as {
         type: string
-        properties: { id: string; sessionID: string; tool?: { callID?: string } }
+        properties: { id: string; tool?: { callID?: string } }
       }
       if (ev.type !== "permission.asked") return
       if (!controller.isActive()) return
       const callID = ev.properties.tool?.callID
       if (typeof callID === "string" && transparency.hasWrapped(callID)) {
-        await client.permission.reply({
-          sessionID: ev.properties.sessionID,
-          requestID: ev.properties.id,
-          reply: "once",
-        })
+        // v1 reply endpoint (/permission/{requestID}/reply) resolves the in-process
+        // request the bash tool created via ctx.ask.
+        await client.permission.reply({ requestID: ev.properties.id, reply: "once" })
       }
     },
 

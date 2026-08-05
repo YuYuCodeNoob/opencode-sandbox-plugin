@@ -3,7 +3,7 @@ import { SandboxController } from "../src/controller"
 import { SandboxRuntimeAdapter } from "../src/adapter"
 import { SandboxPolicyStore } from "../src/policy-store"
 import { SANDBOX_ERROR_CODES, type SandboxManagerLike, type SandboxPolicy } from "../src/types"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -100,5 +100,22 @@ describe("SandboxController", () => {
     await controller.disable()
     expect(controller.status().state).toBe("disabled")
     expect(mgr.calls).toContain("reset")
+  })
+
+  it("allowNetwork updates config live and persists the domain", async () => {
+    const { dir, controller, mgr } = await make()
+    await controller.enable()
+    await controller.allowNetwork("api.example.com", "project")
+    expect(mgr.calls).toContain("updateConfig")
+    const onDisk = JSON.parse(await readFile(path.join(dir, "p.json"), "utf-8"))
+    expect(onDisk.network.allowedDomains).toContain("api.example.com")
+  })
+
+  it("allowNetwork persists even while disabled (applies on next enable)", async () => {
+    const { dir, controller, mgr } = await make()
+    await controller.allowNetwork("api.example.com", "global")
+    expect(mgr.calls).not.toContain("updateConfig") // not active → no live update
+    const onDisk = JSON.parse(await readFile(path.join(dir, "g.json"), "utf-8"))
+    expect(onDisk.network.allowedDomains).toContain("api.example.com")
   })
 })

@@ -22,21 +22,17 @@ type PartLike = {
 export interface V2ClientLike {
   session: {
     messages(params: { sessionID: string }): Promise<Array<{ info: { id: string }; parts: PartLike[] }>>
-    message: {
-      part: {
-        update(params: {
-          sessionID: string
-          messageID: string
-          partID: string
-          part: PartLike
-        }): Promise<unknown>
-      }
-    }
+  }
+  part: {
+    update(params: { sessionID: string; messageID: string; partID: string; part: PartLike }): Promise<unknown>
   }
   permission: {
-    reply(params: { sessionID: string; requestID: string; reply: "once" | "always" | "reject" }): Promise<unknown>
+    /** v1 权限回复端点 `/permission/{requestID}/reply`（解析 bash 工具进程内创建的请求）。 */
+    reply(params: { requestID: string; reply: "once" | "always" | "reject" }): Promise<unknown>
   }
-  showToast(params: { title: string; message: string; variant: string; duration?: number }): Promise<unknown>
+  tui: {
+    showToast(params: { title: string; message: string; variant: string; duration?: number }): Promise<unknown>
+  }
 }
 
 export class TransparencyRepair {
@@ -75,7 +71,7 @@ export class TransparencyRepair {
     if (!part) return
     const input = part.state?.input
     if (input === undefined) return
-    await client.session.message.part.update({
+    await client.part.update({
       sessionID,
       messageID: part.messageID,
       partID: part.id,

@@ -20,13 +20,11 @@ function messagesClient(part: any = {}) {
           ],
         },
       ],
-      message: {
-        part: {
-          update: async (params: any) => {
-            updated.push(params)
-            return {}
-          },
-        },
+    },
+    part: {
+      update: async (params: any) => {
+        updated.push(params)
+        return {}
       },
     },
   }
@@ -85,7 +83,7 @@ describe("TransparencyRepair", () => {
         messages: async () => {
           throw new Error("boom")
         },
-        message: { part: { update: async () => ({}) } },
+        part: { update: async () => ({}) },
       },
     }
     await r.repair(client as any, "s1", "c1")

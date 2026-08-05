@@ -59,6 +59,11 @@ export class SandboxRuntimeAdapter {
     return this.manager.reset()
   }
 
+  /** Network policy is live via updateConfig; filesystem changes need reset+reinit. */
+  updateConfig(policy: SandboxPolicy): void {
+    this.manager.updateConfig(this.buildSrtConfig(policy))
+  }
+
   getEffectivePolicyVersion(policy: SandboxPolicy): number {
     let hash = 0
     const json = JSON.stringify(policy)

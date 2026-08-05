@@ -56,6 +56,25 @@ export class SandboxPolicyStore {
     await this.writeJSON(this.opts.projectPath, next)
   }
 
+  /** Append a domain to the target file's own allowedDomains (deepMerge replaces arrays, so we must read+append+write). */
+  async addAllowedDomain(host: string, scope: "project" | "global"): Promise<void> {
+    await this.appendDomain("allowedDomains", host, scope)
+  }
+
+  /** Append a domain to the target file's own deniedDomains. */
+  async addDeniedDomain(host: string, scope: "project" | "global"): Promise<void> {
+    await this.appendDomain("deniedDomains", host, scope)
+  }
+
+  private async appendDomain(field: "allowedDomains" | "deniedDomains", host: string, scope: "project" | "global"): Promise<void> {
+    const target = scope === "global" ? this.opts.globalPath : this.opts.projectPath
+    const current = await this.readJSON(target)
+    const network = isRecord(current.network) ? (current.network as Record<string, unknown>) : {}
+    const arr = Array.isArray(network[field]) ? (network[field] as string[]) : []
+    if (!arr.includes(host)) arr.push(host)
+    await this.writeJSON(target, { ...current, network: { ...network, [field]: arr } })
+  }
+
   getRuntimeOverride(): boolean | null {
     return this.runtimeOverride
   }
