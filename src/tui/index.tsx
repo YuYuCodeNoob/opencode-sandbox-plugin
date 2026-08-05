@@ -113,6 +113,16 @@ function SandboxWidget(props: { api: TuiPluginApi; theme: TuiThemeCurrent }): JS
               variant: r.state === "error" ? "error" : "info",
               duration: 1500,
             })
+            // 强制重绘：弹一个会实际绘制一帧的 dialog，让静态 slot 重新同步读文件
+            // 刷新开关标签；200ms 后自动清除。toast 本身在部分终端不触发 slot 重渲染。
+            api.ui.dialog.replace(() => <box width={2} height={1} />, () => {})
+            setTimeout(() => {
+              try {
+                api.ui.dialog.clear()
+              } catch {
+                /* best-effort */
+              }
+            }, 200)
           }
           lastKey = key
         }
