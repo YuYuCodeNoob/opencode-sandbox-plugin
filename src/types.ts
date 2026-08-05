@@ -62,4 +62,5 @@ export interface SandboxManagerLike {
   ): Promise<string>
   updateConfig(newConfig: unknown): void
   reset(): Promise<void>
+  getSandboxViolationStore?(): unknown
 }

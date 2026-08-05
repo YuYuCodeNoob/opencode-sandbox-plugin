@@ -1,10 +1,12 @@
-import type { Hooks, PluginInput } from "@opencode-ai/plugin"
+import { tool, type Hooks, type PluginInput } from "@opencode-ai/plugin"
+import type { SandboxViolationStore } from "@anthropic-ai/sandbox-runtime"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import { SandboxController } from "./controller"
 import { SandboxRuntimeAdapter } from "./adapter"
 import { SandboxPolicyStore } from "./policy-store"
 import { TransparencyRepair, type V2ClientLike } from "./transparency"
 import { PermissionBridge } from "./permission-bridge"
+import { ViolationReporter } from "./violations"
 import type { SandboxManagerLike } from "./types"
 
 export interface SandboxPluginOptions {
@@ -65,7 +67,85 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
     onAsk: (req) => bridge.handleAsk(req),
   })
 
+  const violationStore = (opts.manager as { getSandboxViolationStore?(): unknown }).getSandboxViolationStore?.()
+  const violations = violationStore ? new ViolationReporter(client, violationStore as SandboxViolationStore) : null
+  violations?.start()
+
   return {
+    tool: {
+      sandbox_status: tool({
+        description: "Show sandbox state, effective policy summary, pending network grants, and recent violations.",
+        args: {},
+        async execute() {
+          const s = controller.status()
+          const pending = bridge.pendingHosts()
+          const recent = violations?.recent(10) ?? []
+          const lines = [
+            `State: ${s.state}`,
+            `Enabled: ${s.enabled}`,
+            s.lastError ? `Last error: ${s.lastError.code} — ${s.lastError.message}` : null,
+            `Active children: ${s.activeChildren}`,
+            `Pending refresh: ${s.pendingRefresh}`,
+            `Pending network grants: ${pending.map((p) => (p.port !== undefined ? `${p.host}:${p.port}` : p.host)).join(", ") || "none"}`,
+            `Recent violations (${recent.length}): ${recent.map((v) => v.line).join(" | ") || "none"}`,
+          ]
+          return lines.filter((line): line is string => line !== null).join("\n")
+        },
+      }),
+
+      sandbox_enable: tool({
+        description: "Enable the sandbox for this session (fail-closed: bash is blocked until active).",
+        args: {},
+        async execute() {
+          try {
+            await controller.enable()
+            return `Sandbox enabled. State: ${controller.status().state}`
+          } catch (e) {
+            return `Failed to enable sandbox: ${(e as Error).message}`
+          }
+        },
+      }),
+
+      sandbox_disable: tool({
+        description: "Disable the sandbox for this session (bash returns to unsandboxed execution).",
+        args: {},
+        async execute() {
+          await controller.disable()
+          return `Sandbox disabled.`
+        },
+      }),
+
+      sandbox_allow: tool({
+        description:
+          "Allow a network domain in the sandbox. Applies immediately to a pending connection for that host and to all future connections.",
+        args: { host: tool.schema.string(), scope: tool.schema.enum(["project", "global"]).optional() },
+        async execute(args) {
+          const host = args.host
+          const scope = args.scope ?? "global"
+          try {
+            await controller.allowNetwork(host, scope)
+          } catch (e) {
+            return `Failed to update sandbox policy: ${(e as Error).message}`
+          }
+          const resolved = bridge.allow(host)
+          return resolved
+            ? `Allowed ${host} (${scope}). A pending request was approved — the blocked connection may now proceed.`
+            : `Allowed ${host} (${scope}). Policy updated for future connections; no request was pending.`
+        },
+      }),
+
+      sandbox_deny: tool({
+        description: "Deny a network domain in the sandbox (takes precedence over allow).",
+        args: { host: tool.schema.string(), scope: tool.schema.enum(["project", "global"]).optional() },
+        async execute(args) {
+          const host = args.host
+          const scope = args.scope ?? "global"
+          await controller.denyNetwork(host, scope)
+          bridge.deny(host)
+          return `Denied ${host} (${scope}).`
+        },
+      }),
+    },
     async "tool.execute.before"({ tool, sessionID, callID }, output) {
       if (tool !== "bash") return
       if (!controller.isEnabled()) return // disabled → baseline execution
