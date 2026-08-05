@@ -48,6 +48,11 @@ export class SandboxController {
     return this.state === "active"
   }
 
+  /** Sandbox intent is on (any state other than disabled). */
+  isEnabled(): boolean {
+    return this.state !== "disabled"
+  }
+
   private serialized<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.queue.then(fn, fn)
     this.queue = run.catch(() => {})
