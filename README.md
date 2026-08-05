@@ -95,11 +95,13 @@ Sandbox policy is read from three layers (highest wins, deep-merged):
 
 ## Usage
 
-- **Toggle** (bottom-left): click `▣ ON / OFF`, or type `/sandbox-toggle`.
-  - `ON` / `OFF` — effective state from the config default (`enabledByDefault`).
-  - `ON*` / `OFF*` — overridden for this process only; resets on restart.
-  - The label reads the shared runtime file on each TUI repaint, so it may lag
-    a repaint behind a toggle click; `sandbox_status` shows the authoritative state.
+- **Sandbox entry** (bottom-left): the static `Sandbox` label. Click it to open
+  a dialog showing the **current** sandbox state (read from the runtime file) and
+  confirm the toggle; or type `/sandbox-toggle`. The label is intentionally static
+  because the TUI's `app_bottom` slot renders once and cannot be re-rendered live
+  in compiled OpenCode builds.
+- **State feedback**: after a toggle, a toast shows `已启用` / `已关闭`;
+  `sandbox_status` (LLM tool) returns the authoritative state.
 - **Network approval** (TUI dialog when an unlisted host is requested):
   - **Allow once** — lets the current blocked connection through, nothing is persisted.
   - **Always allow** — allows the current connection and writes the host to the

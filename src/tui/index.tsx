@@ -1,5 +1,5 @@
 /**
- * Sandbox TUI 插件 — 左下角开关 + 网络授权弹窗（CLAUDE.md §9 / 控制权迁移）。
+ * Sandbox TUI 插件 — 左下角入口 + 状态/授权弹窗（CLAUDE.md §9 / 控制权迁移）。
  *
  * 在 opencode 的 TUI 进程中加载（`~/.config/opencode/tui.json` 的 plugin 数组）。
  * 通信：
@@ -7,11 +7,11 @@
  *     —— sandbox.get / sandbox.toggle / sandbox.allow / sandbox.deny。
  *   - server → TUI：共享文件 `~/.config/opencode-sandbox/runtime.json`。
  *
- * 平台事实（编译版 opencode v1.17.20）：
- *   - `app_bottom` slot 的渲染是静态快照 —— SolidJS 信号/effect 不会触发重渲染，
- *     因此开关状态在每次 TUI 重绘时同步读文件。
- *   - `setInterval` 在插件里能跑、`api.ui.dialog.replace` 命令式弹窗有效 ——
- *     网络授权弹窗用轮询 + 命令式弹窗实现。
+ * 平台事实（编译版 opencode v1.17.20，已实测）：
+ *   - `app_bottom` slot 的渲染是静态快照 —— SolidJS 信号/effect、toast、微型 dialog
+ *     都不能触发它重渲染。因此左下角只放一个静态入口「Sandbox」，不显示实时状态。
+ *   - `setInterval` 能跑、`api.ui.dialog.replace` 命令式弹窗可靠渲染 ——
+ *     点击入口弹「当前状态 + 确认切换」对话框；网络授权弹窗用轮询 + 命令式弹窗。
  *
  * 控制权在 TUI（人），不暴露给 LLM。
  */
@@ -25,7 +25,7 @@ import type {
   TuiSlotPlugin,
   TuiThemeCurrent,
 } from "@opencode-ai/plugin/tui"
-import { createSignal, onCleanup, onMount } from "solid-js"
+import { onCleanup, onMount } from "solid-js"
 import os from "node:os"
 import path from "node:path"
 import { readFileSync } from "node:fs"
@@ -36,7 +36,7 @@ function runtimeFile(): string {
   return path.join(os.homedir(), ".config", "opencode-sandbox", "runtime.json")
 }
 
-/** 同步读共享 runtime 文件（slot 每次重绘调用）。 */
+/** 同步读共享 runtime 文件。 */
 function readState(): SandboxRuntime | null {
   try {
     const raw = readFileSync(runtimeFile(), "utf-8")
@@ -59,33 +59,8 @@ function readState(): SandboxRuntime | null {
   return null
 }
 
-function toggleLabel(
-  r: SandboxRuntime | null,
-  pal: {
-    on: TuiThemeCurrent["success"]
-    off: TuiThemeCurrent["textMuted"]
-    warn: TuiThemeCurrent["warning"]
-    err: TuiThemeCurrent["error"]
-    text: TuiThemeCurrent["text"]
-  },
-): { label: string; fg: TuiThemeCurrent["success"] } {
-  // 不用 <span> 直接放 <box> 里（该环境下不渲染），避免 U+1F6E1 🛡 等缺字形 emoji。
-  if (!r) return { label: "▣ …", fg: pal.text }
-  switch (r.state) {
-    case "error":
-      return { label: "▣ ERR", fg: pal.err }
-    case "initializing":
-    case "pending-refresh":
-      return { label: "▣ …", fg: pal.warn }
-    default:
-      if (r.enabled) return { label: r.override ? "▣ ON*" : "▣ ON", fg: pal.on }
-      return { label: r.override ? "▣ OFF*" : "▣ OFF", fg: pal.off }
-  }
-}
-
 function SandboxWidget(props: { api: TuiPluginApi; theme: TuiThemeCurrent }): JSX.Element {
   const { api } = props
-  const [, setTick] = createSignal(0)
 
   const send = (cmd: SandboxTuiCommand): void => {
     void api.client.tui.publish({
@@ -93,9 +68,7 @@ function SandboxWidget(props: { api: TuiPluginApi; theme: TuiThemeCurrent }): JS
     })
   }
 
-  // 轮询共享文件：出现待决 ask 就命令式弹窗（slot 静态渲染不影响弹窗）；
-  // 检测到开关状态变化就弹本地 toast —— toast 触发一次 TUI 重绘，让 slot 重新
-  // 同步读文件刷新开关标签（静态快照的补偿手段）。
+  // 轮询共享文件：出现待决 ask 就命令式弹窗（网络授权）；状态变化弹 toast 反馈。
   onMount(() => {
     send({ v: 1, cmd: "sandbox.get" })
     let lastKey = ""
@@ -113,16 +86,6 @@ function SandboxWidget(props: { api: TuiPluginApi; theme: TuiThemeCurrent }): JS
               variant: r.state === "error" ? "error" : "info",
               duration: 1500,
             })
-            // 强制重绘：弹一个会实际绘制一帧的 dialog，让静态 slot 重新同步读文件
-            // 刷新开关标签；200ms 后自动清除。toast 本身在部分终端不触发 slot 重渲染。
-            api.ui.dialog.replace(() => <box width={2} height={1} />, () => {})
-            setTimeout(() => {
-              try {
-                api.ui.dialog.clear()
-              } catch {
-                /* best-effort */
-              }
-            }, 200)
           }
           lastKey = key
         }
@@ -169,24 +132,31 @@ function SandboxWidget(props: { api: TuiPluginApi; theme: TuiThemeCurrent }): JS
     onCleanup(() => clearInterval(timer))
   })
 
-  // slot 渲染：每次 TUI 重绘时同步读文件（静态快照，随重绘刷新）。
-  const r = readState()
-  const pal = toggleLabel(r, {
-    on: props.theme.success,
-    off: props.theme.textMuted,
-    warn: props.theme.warning,
-    err: props.theme.error,
-    text: props.theme.text,
-  })
+  // 点击入口 → 弹当前状态对话框（dialog 可靠渲染，状态永远准确）。
+  const openToggleDialog = (): void => {
+    const r = readState()
+    const stateMsg = r ? (r.enabled ? `已启用 (${r.source})` : "已关闭") : "未知"
+    api.ui.dialog.replace(
+      () => (
+        <api.ui.DialogConfirm
+          title="Sandbox"
+          message={`当前状态：${stateMsg}。确认切换？`}
+          onConfirm={() => {
+            api.ui.dialog.clear()
+            send({ v: 1, cmd: "sandbox.toggle" })
+          }}
+          onCancel={() => {
+            api.ui.dialog.clear()
+          }}
+        />
+      ),
+      () => {},
+    )
+  }
+
   return (
-    <box
-      paddingX={1}
-      onMouseUp={() => {
-        send({ v: 1, cmd: "sandbox.toggle" })
-        setTick((n) => n + 1) // 提示后续重绘时刷新
-      }}
-    >
-      <text style={{ fg: pal.fg }}>{pal.label}</text>
+    <box paddingX={1} onMouseUp={openToggleDialog}>
+      <text style={{ fg: props.theme.text }}>Sandbox</text>
     </box>
   )
 }

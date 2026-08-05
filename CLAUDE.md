@@ -274,8 +274,8 @@ askCallback({host, port})
 |---|---|
 | 未配置访问选择 | PermissionBridge → runtime 文件 `asks[]` → TUI 轮询 → `api.ui.dialog.replace` 命令式弹窗（Allow once / Always allow / Deny） |
 | 状态查看 | 只读自定义 tool `sandbox_status`（状态/来源/违规摘要，LLM 可见但无逃逸面） |
-| 开关控制 | TUI 插件 `app_bottom` slot 左下角开关（`▣ ON/ON*/OFF/OFF*/ERR`，点击或 `/sandbox-toggle`，设 runtimeOverride） |
-| 状态同步 | 服务端写 `runtime.json` → TUI 每次重绘同步读文件刷新开关 |
+| 开关控制 | TUI 插件 `app_bottom` slot 左下角静态入口 `Sandbox`，点击弹「当前状态 + 确认切换」对话框（dialog 可靠渲染），或 `/sandbox-toggle` |
+| 状态同步 | 服务端写 `runtime.json`；**静态 slot 无法实时刷新**（实测：信号/toast/dialog 均不触发 `app_bottom` 重渲染），状态在点击弹窗 / toast 中展示 |
 | 通知 | `client.tui.showToast()`：状态变更、文件违规（server→TUI 受限时可能不显示，弹窗是主通道） |
 
 **通信**：
