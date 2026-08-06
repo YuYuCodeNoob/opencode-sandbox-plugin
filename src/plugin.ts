@@ -229,6 +229,14 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
       controller.afterSpawn(callID)
     },
 
+    async "experimental.chat.messages.transform"(_input, output) {
+      output.messages = await transparency.sanitizeMessages(
+        client,
+        output.messages as Parameters<TransparencyRepair["sanitizeMessages"]>[1],
+      ) as typeof output.messages
+      debugLog("transparency:messages-sanitized")
+    },
+
     async event({ event }) {
       const ev = event as unknown as { type: string; properties: Record<string, any> }
 
