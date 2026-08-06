@@ -71,12 +71,18 @@ function unwrapMessage(res: unknown): MessageLike | undefined {
 
 export class TransparencyRepair {
   private originals = new Map<string, string>()
+  /** callID -> sessionID, retained for transform-time part updates. */
+  private sessionIDs = new Map<string, string>()
   /** callID → 所在 messageID（来自 permission.asked 事件的 tool.messageID，加速定位）。 */
   private messageIDs = new Map<string, string>()
 
   /** Record the original command before the wrapped command replaces it. */
   register(callID: string, original: string): void {
     this.originals.set(callID, original)
+  }
+
+  registerSessionID(callID: string, sessionID: string): void {
+    this.sessionIDs.set(callID, sessionID)
   }
 
   /** Record the message that holds this call's tool part (learned from permission.asked). */
@@ -123,20 +129,33 @@ export class TransparencyRepair {
    */
   async sanitizeMessages(client: V2ClientLike, messages: MessageLike[]): Promise<MessageLike[]> {
     const repairs: Promise<unknown>[] = []
+    let toolParts = 0
+    let wrappedParts = 0
+    let restoredParts = 0
     const sanitized = messages.map((message) => ({
       ...message,
       parts: message.parts.map((part) => {
+        if (part.type === "tool") toolParts++
         const command = part.state?.input?.command
-        if (part.type !== "tool" || typeof command !== "string" || !command.includes("bwrap")) return part
+        const wrapped = typeof command === "string" && command.includes("bwrap")
+        if (!wrapped) return part
+        wrappedParts++
 
         const original = this.restoreCommand(part.callID, command)
         const safeCommand = original ?? "[sandboxed command]"
+        if (original !== undefined) restoredParts++
         const repaired = {
           ...part,
           state: { ...part.state, input: { ...part.state?.input, command: safeCommand } },
         }
-        const sessionID = part.sessionID ?? message.info.sessionID
+        const sessionID =
+          part.sessionID ?? message.info.sessionID ?? (part.callID ? this.sessionIDs.get(part.callID) : undefined)
         if (sessionID && message.info.id && part.id) {
+          debugLog("transparency:transform:part-update", {
+            callID: part.callID,
+            hasSessionID: true,
+            restored: original !== undefined,
+          })
           repairs.push(
             client.part
               .update({
@@ -147,12 +166,26 @@ export class TransparencyRepair {
               })
               .catch(() => undefined),
           )
+        } else {
+          debugLog("transparency:transform:part-update-skipped", {
+            callID: part.callID,
+            hasSessionID: Boolean(sessionID),
+            hasMessageID: Boolean(message.info.id),
+            hasPartID: Boolean(part.id),
+          })
         }
         return repaired
       }),
     }))
 
     await Promise.all(repairs)
+    debugLog("transparency:transform:summary", {
+      messages: messages.length,
+      toolParts,
+      wrappedParts,
+      restoredParts,
+      updates: repairs.length,
+    })
     return sanitized
   }
 

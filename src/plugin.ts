@@ -199,6 +199,7 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
       const original = String(output.args.command ?? "")
       controller.ensureExecutable() // fail-closed: throws unless active
       transparency.register(callID, original)
+      transparency.registerSessionID(callID, sessionID)
       output.args.command = await controller.beforeSpawn(sessionID, callID, original)
     },
 
@@ -230,11 +231,19 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
     },
 
     async "experimental.chat.messages.transform"(_input, output) {
-      output.messages = await transparency.sanitizeMessages(
+      debugLog("transparency:transform:start", {
+        messages: output.messages.length,
+        parts: output.messages.reduce((count, message) => count + message.parts.length, 0),
+      })
+      const sanitized = await transparency.sanitizeMessages(
         client,
         output.messages as Parameters<TransparencyRepair["sanitizeMessages"]>[1],
-      ) as typeof output.messages
-      debugLog("transparency:messages-sanitized")
+      )
+      // workspace-cli keeps using the original `msgs` array after the hook and
+      // does not consume the hook return value. Mutate in place so the provider
+      // sees the sanitized messages in this same request.
+      output.messages.splice(0, output.messages.length, ...sanitized as typeof output.messages)
+      debugLog("transparency:transform:end", { messages: output.messages.length })
     },
 
     async event({ event }) {
