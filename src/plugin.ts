@@ -202,7 +202,7 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
       output.args.command = await controller.beforeSpawn(sessionID, callID, original)
     },
 
-    async "tool.execute.after"({ tool, sessionID, callID }, output) {
+    async "tool.execute.after"({ tool, sessionID, callID, args }, output) {
       if (redactor && redactionTools.has(tool)) {
         const result = redactor.apply(output.output)
         if (result.maskedCount > 0) {
@@ -213,7 +213,12 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
 
       if (tool !== "bash") return
       const original = transparency.peekOriginal(callID)
-      if (original !== undefined) output.title = original
+      if (original !== undefined) {
+        output.title = original
+        if (args && typeof args === "object" && "command" in args) {
+          args.command = original
+        }
+      }
       // 修复 part 的 state.input.command（透明抽象）。不阻塞 bash：HTTP 的
       // 定位+回写比 tool-result → completeToolCall 慢，稍作延迟让后者先把
       // part 置为 completed，修复再读已完成 part 并原样保留其 status。

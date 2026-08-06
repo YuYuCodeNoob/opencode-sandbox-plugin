@@ -1,0 +1,31 @@
+{
+  "enabledByDefault": false,
+  "network": {
+    "allowedDomains": [],
+    "deniedDomains": [],
+    "strictAllowlist": false
+  },
+  "filesystem": {
+    "denyRead": ["~/.ssh"],
+    "allowRead": [],
+    "allowWrite": [],
+    "denyWrite": [],
+    "allowGitConfig": false
+  },
+  "redaction": {
+    "enabled": false,
+    "tools": ["read", "grep", "bash"],
+    "patterns": [
+      { "name": "openai_api_key", "pattern": "sk-[a-zA-Z0-9]{20,}" },
+      { "name": "anthropic_api_key", "pattern": "sk-ant-[a-zA-Z0-9_\\-]{50,}" },
+      { "name": "aws_access_key_id", "pattern": "AKIA[0-9A-Z]{16}" },
+      { "name": "github_pat", "pattern": "gh[ps]_[A-Za-z0-9]{36}" },
+      { "name": "slack_token", "pattern": "xox[baprs]-[a-zA-Z0-9\\-]+" },
+      { "name": "google_api_key", "pattern": "AIza[0-9A-Za-z_\\-]{35}" },
+      {
+        "name": "generic_secret_assign",
+        "pattern": "(?i)(?:api[_-]?key|secret|token|password)\\s*[:=]\\s*['\"]?[a-zA-Z0-9_\\-]{32,}['\"]?"
+      }
+    ]
+  }
+}
