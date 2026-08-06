@@ -10,6 +10,7 @@ import { ViolationReporter } from "./violations"
 import { decodeTuiCommand } from "./tui-protocol"
 import { runtimePathFor, writeRuntime } from "./runtime-store"
 import { debugLog } from "./debug"
+import { Redactor } from "./redactor"
 import type { SandboxManagerLike, SandboxStatus } from "./types"
 
 export interface SandboxPluginOptions {
@@ -150,6 +151,15 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
   const violations = violationStore ? new ViolationReporter(client, violationStore as SandboxViolationStore) : null
   violations?.start()
 
+  let redactor: Redactor | null = null
+  let redactionTools = new Set<string>()
+  void store.load().then((policy) => {
+    if (!policy.redaction.enabled) return
+    redactor = new Redactor(policy.redaction.patterns)
+    redactionTools = new Set(policy.redaction.tools)
+    debugLog("redactor:init", `${policy.redaction.patterns.length} patterns, tools: ${policy.redaction.tools.join(", ")}`)
+  })
+
   // Auto-enable when the effective default is on (runtimeOverride ?? enabledByDefault),
   // so a config of enabledByDefault: true actually activates the sandbox at startup.
   void store
@@ -193,6 +203,14 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
     },
 
     async "tool.execute.after"({ tool, sessionID, callID }, output) {
+      if (redactor && redactionTools.has(tool)) {
+        const result = redactor.apply(output.output)
+        if (result.maskedCount > 0) {
+          output.output = result.output
+          debugLog("redactor:applied", `${tool}: ${result.maskedCount} match(es) masked`)
+        }
+      }
+
       if (tool !== "bash") return
       const original = transparency.peekOriginal(callID)
       if (original !== undefined) output.title = original

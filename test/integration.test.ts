@@ -19,6 +19,7 @@ const policy: SandboxPolicy = {
   enabledByDefault: true,
   network: { allowedDomains: [], deniedDomains: [], strictAllowlist: true },
   filesystem: { denyRead: ["~/.ssh"], allowRead: [], allowWrite: [], denyWrite: [], allowGitConfig: false },
+  redaction: { enabled: false, patterns: [], tools: ["read", "grep", "bash"] },
 }
 
 async function runWrapped(wrapped: string, timeoutMs = 20_000) {

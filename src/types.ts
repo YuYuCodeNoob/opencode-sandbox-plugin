@@ -1,5 +1,11 @@
 export type SandboxState = "disabled" | "initializing" | "active" | "pending-refresh" | "error"
 
+export interface RedactionPattern {
+  name: string
+  pattern: string
+  replacement?: string
+}
+
 export interface SandboxPolicy {
   enabledByDefault: boolean
   network: {
@@ -13,6 +19,11 @@ export interface SandboxPolicy {
     allowWrite: string[]
     denyWrite: string[]
     allowGitConfig: boolean
+  }
+  redaction: {
+    enabled: boolean
+    patterns: RedactionPattern[]
+    tools: string[]
   }
 }
 

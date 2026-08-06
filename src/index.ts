@@ -9,6 +9,7 @@ export { SandboxPolicyStore } from "./policy-store"
 export { SandboxRuntimeAdapter } from "./adapter"
 export { SandboxController } from "./controller"
 export { TransparencyRepair } from "./transparency"
+export { Redactor } from "./redactor"
 export * from "./types"
 
 export default {
