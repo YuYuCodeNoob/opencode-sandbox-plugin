@@ -19,6 +19,7 @@ const policy: SandboxPolicy = {
   enabledByDefault: true,
   network: { allowedDomains: ["api.example.com"], deniedDomains: [], strictAllowlist: false },
   filesystem: { denyRead: ["~/.ssh"], allowRead: [], allowWrite: ["/work"], denyWrite: [], allowGitConfig: false },
+  redaction: { enabled: false, patterns: [], tools: ["read", "grep", "bash"] },
 }
 
 describe("SandboxRuntimeAdapter", () => {

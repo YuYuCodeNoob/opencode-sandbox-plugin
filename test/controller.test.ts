@@ -25,6 +25,7 @@ const policy: SandboxPolicy = {
   enabledByDefault: true,
   network: { allowedDomains: [], deniedDomains: [], strictAllowlist: false },
   filesystem: { denyRead: [], allowRead: [], allowWrite: [], denyWrite: [], allowGitConfig: false },
+  redaction: { enabled: false, patterns: [], tools: ["read", "grep", "bash"] },
 }
 
 async function make(opts: { failInit?: boolean; ask?: (req: any) => Promise<boolean> } = {}) {

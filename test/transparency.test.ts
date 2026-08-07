@@ -75,6 +75,54 @@ function hintedClient(parts: any[] = [part()], hintMessageID = "m2") {
 }
 
 describe("TransparencyRepair", () => {
+  it("restores from the in-memory call mapping before parsing the wrapper", () => {
+    const r = new TransparencyRepair()
+    r.register("c1", "cat ~/.ssh/id_rsa.pub")
+    expect(r.restoreCommand("c1", "bwrap --setenv SRT_ENCODED_CMD ZWNobyB3cm9uZw==")).toBe(
+      "cat ~/.ssh/id_rsa.pub",
+    )
+  })
+
+  it("restores from SRT_ENCODED_CMD after a process restart", () => {
+    const r = new TransparencyRepair()
+    expect(r.restoreCommand("unknown", "bwrap --setenv SRT_ENCODED_CMD Y2F0ICIkSE9NRS8uc3NoL2lkX3JzYS5wdWIi")).toBe(
+      'cat "$HOME/.ssh/id_rsa.pub"',
+    )
+  })
+
+  it("sanitizes messages and persists the clean tool part", async () => {
+    const r = new TransparencyRepair()
+    const updated: unknown[] = []
+    const client = {
+      part: { update: async (params: unknown) => updated.push(params) },
+    }
+    const result = await r.sanitizeMessages(client as any, [
+      {
+        info: { id: "m1", sessionID: "s1" },
+        parts: [part("c1")],
+      },
+    ] as any)
+
+    expect((result as any)[0].parts[0].state?.input?.command).toBe("[sandboxed command]")
+    expect(updated).toHaveLength(1)
+    expect((updated[0] as any).part.state.input.command).toBe("[sandboxed command]")
+  })
+
+  it("uses the original mapping while sanitizing and keeps unrelated parts unchanged", async () => {
+    const r = new TransparencyRepair()
+    r.register("c1", "cat ~/.ssh/id_rsa.pub")
+    const updated: unknown[] = []
+    const client = { part: { update: async (params: unknown) => updated.push(params) } }
+    const clean = { id: "p2", type: "text", text: "safe" }
+    const result = await r.sanitizeMessages(client as any, [
+      { info: { id: "m1", sessionID: "s1" }, parts: [part("c1"), clean as any] },
+    ] as any)
+
+    expect((result as any)[0].parts[0].state?.input?.command).toBe("cat ~/.ssh/id_rsa.pub")
+    expect((result as any)[0].parts[1]).toBe(clean)
+    expect((updated[0] as any).part.state.input.command).toBe("cat ~/.ssh/id_rsa.pub")
+  })
+
   it("stores and returns the original command by callID (consumed once)", () => {
     const r = new TransparencyRepair()
     r.register("c1", "echo hello")
@@ -140,7 +188,7 @@ describe("TransparencyRepair", () => {
     r.register("c1", "echo hello")
     const { client } = messagesClient([part("other")]) // no matching part
     await r.repair(client as any, "s1", "c1") // must not throw
-    expect(r.takeOriginal("c1")).toBeUndefined() // original consumed
+    expect(r.peekOriginal("c1")).toBe("echo hello") // retained for message transform retry
   })
 
   it("does nothing when no original was registered", async () => {
@@ -163,6 +211,6 @@ describe("TransparencyRepair", () => {
       },
     }
     await r.repair(client as any, "s1", "c1")
-    expect(r.takeOriginal("c1")).toBeUndefined()
+    expect(r.peekOriginal("c1")).toBe("echo hello")
   })
 })

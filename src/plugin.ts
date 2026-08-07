@@ -10,6 +10,7 @@ import { ViolationReporter } from "./violations"
 import { decodeTuiCommand } from "./tui-protocol"
 import { runtimePathFor, writeRuntime } from "./runtime-store"
 import { debugLog } from "./debug"
+import { Redactor } from "./redactor"
 import type { SandboxManagerLike, SandboxStatus } from "./types"
 
 export interface SandboxPluginOptions {
@@ -150,6 +151,15 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
   const violations = violationStore ? new ViolationReporter(client, violationStore as SandboxViolationStore) : null
   violations?.start()
 
+  let redactor: Redactor | null = null
+  let redactionTools = new Set<string>()
+  void store.load().then((policy) => {
+    if (!policy.redaction.enabled) return
+    redactor = new Redactor(policy.redaction.patterns)
+    redactionTools = new Set(policy.redaction.tools)
+    debugLog("redactor:init", `${policy.redaction.patterns.length} patterns, tools: ${policy.redaction.tools.join(", ")}`)
+  })
+
   // Auto-enable when the effective default is on (runtimeOverride ?? enabledByDefault),
   // so a config of enabledByDefault: true actually activates the sandbox at startup.
   void store
@@ -189,13 +199,27 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
       const original = String(output.args.command ?? "")
       controller.ensureExecutable() // fail-closed: throws unless active
       transparency.register(callID, original)
+      transparency.registerSessionID(callID, sessionID)
       output.args.command = await controller.beforeSpawn(sessionID, callID, original)
     },
 
-    async "tool.execute.after"({ tool, sessionID, callID }, output) {
+    async "tool.execute.after"({ tool, sessionID, callID, args }, output) {
+      if (redactor && redactionTools.has(tool)) {
+        const result = redactor.apply(output.output)
+        if (result.maskedCount > 0) {
+          output.output = result.output
+          debugLog("redactor:applied", `${tool}: ${result.maskedCount} match(es) masked`)
+        }
+      }
+
       if (tool !== "bash") return
       const original = transparency.peekOriginal(callID)
-      if (original !== undefined) output.title = original
+      if (original !== undefined) {
+        output.title = original
+        if (args && typeof args === "object" && "command" in args) {
+          args.command = original
+        }
+      }
       // 修复 part 的 state.input.command（透明抽象）。不阻塞 bash：HTTP 的
       // 定位+回写比 tool-result → completeToolCall 慢，稍作延迟让后者先把
       // part 置为 completed，修复再读已完成 part 并原样保留其 status。
@@ -204,6 +228,22 @@ export function createSandboxPlugin(input: PluginInput, opts: SandboxPluginOptio
         void withTimeout(transparency.repair(client, sessionID, callID, messageID), 5000).catch(() => {})
       }, 250)
       controller.afterSpawn(callID)
+    },
+
+    async "experimental.chat.messages.transform"(_input, output) {
+      debugLog("transparency:transform:start", {
+        messages: output.messages.length,
+        parts: output.messages.reduce((count, message) => count + message.parts.length, 0),
+      })
+      const sanitized = await transparency.sanitizeMessages(
+        client,
+        output.messages as Parameters<TransparencyRepair["sanitizeMessages"]>[1],
+      )
+      // workspace-cli keeps using the original `msgs` array after the hook and
+      // does not consume the hook return value. Mutate in place so the provider
+      // sees the sanitized messages in this same request.
+      output.messages.splice(0, output.messages.length, ...sanitized as typeof output.messages)
+      debugLog("transparency:transform:end", { messages: output.messages.length })
     },
 
     async event({ event }) {
